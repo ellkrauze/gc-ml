@@ -1,3 +1,22 @@
+import numpy as np
+import gym
+import subprocess
+import re
+import os
+import math
+
+import matplotlib as mpl
+# mpl.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation, PillowWriter
+
+low = -100
+high = 100
+# low = 0
+# high = 314
+# low = -100 * math.pi
+# high = 150 * math.pi
+
 import os
 import re
 import sys
@@ -15,11 +34,12 @@ from gym.spaces import Discrete, Box, Dict, MultiDiscrete
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 from scipy.optimize import basinhopping
+from IPython.display import display, clear_output
 
 
 class JVMEnvTest(gym.Env):
 
-    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
+    metadata = {"render_modes": ["human"] }
     
     def __init__(self, render_mode=None):
         self.window_size = 512  # The size of the PyGame window
@@ -33,7 +53,8 @@ class JVMEnvTest(gym.Env):
             1: 1,
         }
 
-        self.observation_space = Box(low=-np.inf, high=np.inf, dtype=np.float32, shape=(2,))
+        # self.observation_space = Box(low=-np.inf, high=np.inf, dtype=np.float32, shape=(2,))
+        self.observation_space = Box(low=-np.inf, high=np.inf, dtype=np.int, shape=(2,))
 
         # self.low = 0.0
         # self.high = self.coef * math.pi
@@ -48,26 +69,24 @@ class JVMEnvTest(gym.Env):
 
         assert render_mode is None or render_mode in self.metadata["render_modes"]
         self.render_mode = render_mode
-
-        """
-        If human-rendering is used, `self.window` will be a reference
-        to the window that we draw to. `self.clock` will be a clock that is used
-        to ensure that the environment is rendered at the correct framerate in
-        human-mode. They will remain `None` until human-mode is used for the
-        first time.
-        """
-        self.window = None
-        self.clock = None
-        # self._best_agent_location = None
+        
+        self.fig, self.ax = plt.subplots()
+        self.line, = self.ax.plot([], [])
+        self.ax.set_xlabel('X')
+        self.ax.set_ylabel('Y')
+        self.ax.set_title('Agent Learning Curve Navigation')
+        # self.ax.set_xlim(self.low, self.high)
+        # self.ax.set_ylim(self.y(self.low), self.y(self.high))
 
     def y(self, x):
         # return - (2/self.coef) * (x**2) 
         # return np.sin(np.divide(x, self.coef)) * self.coef * 2
         # return math.pow(x, 4) + self.coef * math.pow(x, 3) - self.coef * 2 * x
         return 2*math.pow(x, 3) - 3*math.pow(x, 2) - 12 * x + 1
+        # return 4 * math.pow(x, 4) + 10*math.pow(x, 3) - 3 *math.pow(x, 2) - 12*x
     
-    def y_prime(self, x):
-        return 2 * np.cos(np.divide(x, self.coef))
+    # def y_prime(self, x):
+    #     return 2 * np.cos(np.divide(x, self.coef))
     
     def get_reward(self, next_state, current_state):
         """
@@ -81,7 +100,7 @@ class JVMEnvTest(gym.Env):
         return (next_state - current_state) / current_state
 
     def step(self, action):
-
+        # print('STEP')
         action = self._action_to_direction[action]
         # x = x + action ({-1, 1})
         self._agent_location[0] += action
@@ -90,26 +109,31 @@ class JVMEnvTest(gym.Env):
 
         # Multiply by (-1) in the task of minimization.
         # The agent is penalised with a reward of -1 for each timestep.
-        reward = -self.get_reward( self.y(self._agent_location[0]) , self._agent_location[1] )
+        # reward = -self.get_reward( self.y(self._agent_location[0]) , self._agent_location[1] )
         
         # y = y + y(x+action)
         self._agent_location[1] = self.y(self._agent_location[0])
 
+        # reward = -self.get_reward( self.y(self._agent_location[0]) , self._agent_location[1] )
         # if self._agent_location[1] <= self._best_agent_location:
         #     self._best_agent_location = self._agent_location[1]
         #     reward = 1
         # else:
         #     reward = -1
 
+        reward = -self._agent_location[1]
+
         # An episode is done if the agent has reached the target.
         done = np.allclose(self._agent_location, self._target_location)
-        if done: print("DONE") 
-        # reward = -1
+        # if done: print("DONE") 
+        # if not done: reward = -1
         observation = self._get_obs()
 
         info = {}
         # info = self._get_info()
         # print(self._get_info())
+
+        self.ax.clear()
 
         if self.render_mode == "human":
             self._render_frame()
@@ -153,49 +177,30 @@ class JVMEnvTest(gym.Env):
         info = self._get_info()
 
         # print(info)
+        
+        self.ax.clear()
 
         if self.render_mode == "human":
             self._render_frame()
 
         return observation
 
-    def render(self):
-        if self.render_mode == "rgb_array":
-            return self._render_frame()
-
-    def _render_frame(self):
-        # plt.close('all')
-        fig, ax = plt.subplots()
-        ax.set_xlim([self.low, self.high])
-        ax.set_ylim([self.y(self.low), self.y(self.high)])
-        x = np.arange(self.low, self.high)
-        y = [self.y(x) for x in x]
-
-        scat = ax.scatter(1, 0)
-        ax.plot(x, y, c='k') # the curve (black)
-        ax.scatter(target_x, self.y(target_x), c='r') # the target point (red)
-
-        def animate(i):
-            scat.set_offsets((self._agent_location[0], self._agent_location[1]))
-            return scat,
-
-        anim = FuncAnimation(
-            fig, 
-            animate, 
-            repeat=True,
-            frames=len(x) - 1, 
-            interval=50
-        )
-
-        # To save the animation using Pillow as a gif
-        writer = PillowWriter(
-            fps=15,
-            metadata=dict(artist='BellSoft'),
-            bitrate=1800
-        )
-
-        anim.save('scatter.gif', writer=writer)
-        plt.show()
+    def render(self, mode):
+        x_vals = np.linspace(self.low, self.high)
+        y_vals = [self.y(x) for x in x_vals]
+        
+        self.ax.clear()
+        self.ax.grid(True)
+        self.ax.plot(x_vals, y_vals, color='black')
+        self.ax.scatter(self._target_location[0], self._target_location[1], color='red', label="Target")
+        self.ax.scatter(self._agent_location[0], self._agent_location[1], color='blue', label="Agent")
+        
+        self.ax.set_xlabel('X')
+        self.ax.set_ylabel('Y')
+        self.ax.set_title('Agent Learning Curve Navigation')
+        self.ax.legend()
+        clear_output(wait=True)
+        display(self.fig)
 
     def close(self):
         pass
