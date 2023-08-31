@@ -54,7 +54,7 @@ class JVMEnvTest(gym.Env):
         }
 
         # self.observation_space = Box(low=-np.inf, high=np.inf, dtype=np.float32, shape=(2,))
-        self.observation_space = Box(low=-np.inf, high=np.inf, dtype=np.int, shape=(2,))
+        self.observation_space = Box(low=-np.inf, high=np.inf, dtype=int, shape=(2,))
 
         # self.low = 0.0
         # self.high = self.coef * math.pi
@@ -70,11 +70,11 @@ class JVMEnvTest(gym.Env):
         assert render_mode is None or render_mode in self.metadata["render_modes"]
         self.render_mode = render_mode
         
-        self.fig, self.ax = plt.subplots()
-        self.line, = self.ax.plot([], [])
-        self.ax.set_xlabel('X')
-        self.ax.set_ylabel('Y')
-        self.ax.set_title('Agent Learning Curve Navigation')
+        # self.fig, self.ax = plt.subplots()
+        # self.line, = self.ax.plot([], [])
+        # self.ax.set_xlabel('X')
+        # self.ax.set_ylabel('Y')
+        # self.ax.set_title('Agent Learning Curve Navigation')
         # self.ax.set_xlim(self.low, self.high)
         # self.ax.set_ylim(self.y(self.low), self.y(self.high))
 
@@ -181,11 +181,17 @@ class JVMEnvTest(gym.Env):
         self.ax.clear()
 
         if self.render_mode == "human":
-            self._render_frame()
+            self._render()
 
         return observation
 
-    def render(self, mode):
+    def render(self, mode): 
+        self.fig, self.ax = plt.subplots()
+        self.line, = self.ax.plot([], [])
+        self.ax.set_xlabel('X')
+        self.ax.set_ylabel('Y')
+        self.ax.set_title('Agent Learning Curve Navigation')
+         
         x_vals = np.linspace(self.low, self.high)
         y_vals = [self.y(x) for x in x_vals]
         
