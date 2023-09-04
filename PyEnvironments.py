@@ -19,6 +19,8 @@ from tf_agents.specs import array_spec
 from tf_agents.environments import py_environment
 from tf_agents.trajectories import time_step as ts
 
+logging.basicConfig(format='%(asctime)s-ENV-%(levelname)s-%(message)s', level=logging.DEBUG, datefmt='%Y-%m-%d %H:%M:%S')
+
 class CurveEnv(py_environment.PyEnvironment):
     
     def __init__(self, verbose: bool=False):
@@ -343,11 +345,11 @@ class JVMEnv(py_environment.PyEnvironment):
             bm_path: str,
             bm: str = "cassandra",
             n: int = 5,
-            goal: str = "maxFullGCPause",
+            goal: str = "throughput",
             verbose: bool=False
         ):
         
-        self._jdk = jdk
+        self._jdk = os.path.join(jdk, "bin")
         # self._state = 0
         self._episode_ended = False
         self._verbose = verbose
@@ -358,25 +360,28 @@ class JVMEnv(py_environment.PyEnvironment):
         self._goal = goal
 
         self._env = os.environ.copy()
-        self._env["PATH"] = f"{self._jdk}/bin:{self._env['PATH']}"
+        self._env["PATH"] = f"{self._jdk}:{self._env['PATH']}"
         self._gc_viewer_jar = "gcviewer-1.36.jar"
 
         # TODO: Add more flags
-        self._num_variables = 2
+        self._num_variables = 1
+        # self._num_variables = 2
         self._flags = {
-            "MaxHeapSize": {"min": 2.68e+8, "max": 4.29e+9},
-            "InitialHeapSize": {"min": 1.25e+8, "max": 2.5e+8},
+            "MaxHeapSize": {"min": 6.4e+7, "max": 4.29e+9},
+            # "MaxHeapSize": {"min": 6.4e+7, "max": 1e+9}, # 64m to 1G
+            # "InitialHeapSize": {"min": 1.25e+8, "max": 2.5e+8},
         }
         self._action_mapping = {
             0: self._decrease_MaxHeapSize,
             1: self._increase_MaxHeapSize,
-            2: self._decrease_InitialHeapSize,
-            3: self._increase_InitialHeapSize,
+            # 2: self._decrease_InitialHeapSize,
+            # 3: self._increase_InitialHeapSize,
         }
 
         assert len(list(self._action_mapping.keys())) == 2*self._num_variables
-        assert os.path.exists(self._gc_viewer_jar)
-        assert os.path.exists(self._bm_path)
+        assert os.path.exists(self._gc_viewer_jar), f"{self._gc_viewer_jar} does not exist"
+        assert os.path.exists(self._bm_path), f"{self._bm_path} does not exist"
+        assert os.path.exists(self._jdk), f"{self._jdk} does not exist"
         
         self._flags_min_values = [self._flags[i]["min"] for i in self._flags.keys()]
         self._flags_max_values = [self._flags[i]["max"] for i in self._flags.keys()]
@@ -397,9 +402,24 @@ class JVMEnv(py_environment.PyEnvironment):
             name='observation'
         )
 
-        # This will take a while
+        # It will take a while
         self._default_goal_value = self._get_initial_goal_value()
+        self._default_state = self._get_initial_state()
         self._current_goal_value = self._default_goal_value
+
+        """
+        A cache to store performance
+        measurements for states.
+        Han, Xue & Yu, Tingting. (2020). 
+        Automated Performance Tuning for Highly-Configurable Software Systems. 
+
+        0: {"args": [10, 10], "goal": 234},
+        1: {"args": [10, 20], "goal": 222},
+        """
+        self._perf_states = {
+            0: {"args": self._default_state[0], "goal": self._default_goal_value}
+        }
+
         
     def action_spec(self):
         return self._action_spec
@@ -410,59 +430,52 @@ class JVMEnv(py_environment.PyEnvironment):
     def _reset(self):
         self._episode_ended = False
         self._current_goal_value = self._default_goal_value
-        self._state = self._get_initial_state()
+        self._state = self._default_state
 
         # self.ax.clear()
-
         # if self.render_mode == "human":
         #     self._render()
 
-        if self._verbose: logging.debug(f"[RESET] state: {self._state}, target: {self._current_goal_value}")
-
+        logging.debug(f"[RESET] state: {self._state}, target: {self._current_goal_value}")
         return ts.restart(np.array(self._state[0], dtype=np.int64))
-        # return ts.restart(self._state[0])
 
     def _step(self, action):
         if self._episode_ended:
             # The last action ended the episode. Ignore the current action and start
             # a new episode.
             return self.reset()
-
         # Apply an action based on the mapping: decrease/increase <flag_value>
-        self._action_mapping.get(int(action))()
-
-        for i in range(len(self._state[0])):
-            # Iterate through each flag value in `self._state`
-            # and use `np.clip` to make sure we don't leave
-            # the boundaries
-            min_value_i = self._flags_min_values[i]
-            max_value_i = self._flags_max_values[i]
-            self._state[0][i] = np.clip(self._state[0][i], min_value_i, max_value_i)
+        new_state = self._action_mapping.get(int(action))(self._state)
+        # Make sure we don't leave the boundaries
+        self._state = self._clip_state(new_state)
         
         # Get new JVM options values after setting `self._state`
         jvm_opts = self._update_jvm_opts()
-
         # Launch a benchmark with a new JVM configuration
         self._run(jvm_opts, self._gc_log_file, self._bm, self._bm_path, self._n)
+        # Get the goal value
+        goal = self._get_goal_value()
         
         previous_goal_value = self._current_goal_value
-        self._current_goal_value = self._get_goal_value()
-        self._state[1] = self._current_goal_value
+        
+        self._state[1] = goal
+        self._current_goal_value = goal
 
         # self._episode_ended = self._is_equal(self._state, self._target_location)
         if self._current_goal_value <= self._default_goal_value // 2:
             self._episode_ended = True
 
-        # A metric (fullGCMaxTime, throughput, latency, etc) is a reward itself
-        # reward = -1 * self._current_goal_value # ! Multiply by (-1) if lower is better
-        reward = self._get_reward(self._current_goal_value, previous_goal_value)
-
+        # ! Multiply by (-1) if lower is better
+        # reward = -1 * self._current_goal_value 
+        # reward = self._get_reward(self._current_goal_value, previous_goal_value)
+        reward = self._get_reward(self._current_goal_value, self._default_goal_value)
+        
         # self.ax.clear()
 
         # if self.render_mode == "human":
         #     self._render_frame()
 
-        if self._verbose: print(f"[STEP] state: {self._state}, current_goal_value: {self._current_goal_value}, reward: {reward}")
+        logging.debug(f"[STEP] state: {self._state}, current_goal_value: {self._current_goal_value}, reward: {reward}")
 
         if self._episode_ended:
             return ts.termination(
@@ -471,6 +484,47 @@ class JVMEnv(py_environment.PyEnvironment):
             return ts.transition(
                 np.array(self._state[0], dtype=np.int64), reward=0.0, discount=1.0)
     
+    def _state_merging(self, flags):
+        """
+        Store states' JVM configurations and performance measurements
+        in a cache. The cache stores the JVM flags and the metric goal.
+        In each `self._step` iteration, the performance of the same
+        state is queried and retrieved directly from the cache instead
+        of re-running the benchmark utility.
+        """
+        logging.debug("[_STATE_MERGING]", self._perf_states)
+        saved_states = [self._perf_states[i]["args"] for i in self._perf_states.keys()]
+        logging.debug("[_STATE_MERGING]", self._perf_states)
+        if flags in saved_states:
+            for i in self._perf_states.keys():
+                """ 
+                If current state is stored in a cache,
+                update the state goal value.
+                """
+                if flags == self._perf_states[i]["args"]:
+                    goal = self._perf_states[i]["goal"]
+        elif flags not in saved_states:
+            """ 
+            If current state is not stored in the cache,
+            measure the performance metric, and save it
+            in the cache.
+            """
+            try:
+                last_index = list(self._perf_states.keys())[-1]
+            except IndexError:
+                # If `self._perf_states` is empty
+                last_index = -1
+
+            # Get new JVM options values after setting `self._state`
+            jvm_opts = self._update_jvm_opts()
+            # Launch a benchmark with a new JVM configuration
+            self._run(jvm_opts, self._gc_log_file, self._bm, self._bm_path, self._n)
+            # Get the goal value
+            goal = self._get_goal_value()
+            # Store a new state in the cache
+            self._perf_states[last_index + 1] = {"args": flags, "goal": goal}
+        return flags, goal
+
     def _get_JVM_opt_value(self, opt: str):
         """
         Get the defaul JVM option value from environment
@@ -521,10 +575,23 @@ class JVMEnv(py_environment.PyEnvironment):
         flags = []
         for flag_name in self._flags.keys():
             flags.append(self._get_JVM_opt_value(flag_name))
-        goal = self._get_initial_goal_value()
+        # goal = self._get_initial_goal_value()
+        goal = self._default_goal_value
         initial_state = np.array([flags, goal], dtype=object)
         return initial_state
-
+    
+    def _clip_state(self, state):
+        for i in range(len(state[0])):
+            """ 
+            Iterate through each flag value in `state`
+            and use `np.clip` to make sure we don't leave
+            the boundaries
+            """
+            min_value_i = self._flags_min_values[i]
+            max_value_i = self._flags_max_values[i]
+            state[0][i] = np.clip(state[0][i], min_value_i, max_value_i)
+        return state
+    
     def _get_goal_value(self):
         
         sep = ';'
@@ -542,7 +609,7 @@ class JVMEnv(py_environment.PyEnvironment):
             text = True,
             env = self._env)
         
-        assert os.path.exists(summary)
+        assert os.path.exists(summary), f"File {summary} does not exist"
 
         with open(summary, "+r") as summary_file:
             for line in summary_file.readlines():
@@ -563,23 +630,27 @@ class JVMEnv(py_environment.PyEnvironment):
         
         Han, Xue & Yu, Tingting. (2020). Automated Performance Tuning for Highly-Configurable Software Systems. 
         """
-        return abs(next_state - current_state) / current_state
+        return (next_state - current_state) / current_state
 
-    def _decrease_MaxHeapSize(self):
+    def _decrease_MaxHeapSize(self, state):
         coef = 100 * (2**10) * (2**10) # 100 Mb
-        self._state[0][0] -= 1 * coef
+        state[0][0] -= 1 * coef
+        return state
     
-    def _increase_MaxHeapSize(self):
+    def _increase_MaxHeapSize(self, state):
         coef = 100 * (2**10) * (2**10) # 100 Mb
-        self._state[0][0] += 1 * coef
+        state[0][0] += 1 * coef
+        return state
     
-    def _decrease_InitialHeapSize(self):
+    def _decrease_InitialHeapSize(self, state):
         coef = 100 * (2**10) * (2**10) # 100 Mb
-        self._state[0][1] -= 1 * coef
+        state[0][1] -= 1 * coef
+        return state
     
-    def _increase_InitialHeapSize(self):
+    def _increase_InitialHeapSize(self, state):
         coef = 100 * (2**10) * (2**10) # 100 Mb
-        self._state[0][1] += 1 * coef
+        state[0][1] += 1 * coef
+        return state
     
     def _is_equal(self, state, target):
         return np.allclose(state[0], target[0])
@@ -626,6 +697,7 @@ class JVMEnv(py_environment.PyEnvironment):
 
         # Run the benchmark (hide output)
         try:
+            logging.debug(f"Running {bm} with JVM_OPTS={jvm_opts}")
             subprocess.check_output(
                 ["java",
                 "-cp", bm_path,
@@ -638,7 +710,7 @@ class JVMEnv(py_environment.PyEnvironment):
                 env = self._env)
         except subprocess.CalledProcessError as e:
             raise Exception("Command failed with return code", e.returncode, e.output)
-          
+
         return
     
     def _render(self): 
