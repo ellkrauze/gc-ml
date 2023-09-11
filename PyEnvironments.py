@@ -6,14 +6,16 @@ import gym
 import random
 import requests
 import json
+import copy
 import subprocess
 import logging
-from typing import List
-from gym.spaces import Discrete, Box
 import numpy as np
 import matplotlib.pyplot as plt
-# from scipy.optimize import basinhopping
 import scipy.optimize as optimize
+from constraint import *
+from typing import List
+from gym.spaces import Discrete, Box
+# from scipy.optimize import basinhopping
 from IPython.display import display, clear_output
 from tf_agents.specs import array_spec
 from tf_agents.environments import py_environment
@@ -45,12 +47,12 @@ class CurveEnv(py_environment.PyEnvironment):
     def _reset(self):
         self._episode_ended = False
         self._target_location = self._get_target()
-        self._state = self._get_initial_state()
+        self._state = self._get_default_state()
 
         # We will sample agent's location until 
         # it does not coincide with the target location
         while np.allclose(self._state, self._target_location): 
-            self._state = self._get_initial_state()
+            self._state = self._get_default_state()
         
         self._best_state = self._state
 
@@ -111,7 +113,7 @@ class CurveEnv(py_environment.PyEnvironment):
         target_y = np.round(solution.fun, 5)
         return np.array([target_x, target_y], dtype=np.int32)
     
-    def _get_initial_state(self):
+    def _get_default_state(self):
         state_x = np.random.randint(self._low, self._high, size=None, dtype=int)
         state_y = self._y(state_x)
         return np.array([state_x, state_y], dtype=np.int32)
@@ -196,12 +198,12 @@ class CurveMultipleEnv(py_environment.PyEnvironment):
     def _reset(self):
         self._episode_ended = False
         self._target_location = self._get_target()
-        self._state = self._get_initial_state()
+        self._state = self._get_default_state()
 
         # We will sample agent's location until 
         # it does not coincide with the target location
         while self._is_equal(self._state, self._target_location): 
-            self._state = self._get_initial_state()
+            self._state = self._get_default_state()
         
         self._best_state = self._state
 
@@ -277,7 +279,7 @@ class CurveMultipleEnv(py_environment.PyEnvironment):
         else:
             raise ValueError(result.message)
     
-    def _get_initial_state(self):
+    def _get_default_state(self):
         state_args = np.random.randint(
             list(self._flags_min.values()), 
             list(self._flags_max.values()),
@@ -345,7 +347,7 @@ class JVMEnv(py_environment.PyEnvironment):
             bm_path: str,
             bm: str = "cassandra",
             n: int = 5,
-            goal: str = "throughput",
+            goal: str = "avgGCPause",
             verbose: bool=False
         ):
         
@@ -363,22 +365,25 @@ class JVMEnv(py_environment.PyEnvironment):
         self._env["PATH"] = f"{self._jdk}:{self._env['PATH']}"
         self._gc_viewer_jar = "gcviewer-1.36.jar"
 
+        # ============= F L A G S =============
         # TODO: Add more flags
-        self._num_variables = 1
-        # self._num_variables = 2
+        # TODO: Find min and max values for flags
+        # TODO: (256 MB, 512 MB, 1024 MB, 2048 MB, 4096 MB, and 8192 MB).
+        self._num_variables = 2
         self._flags = {
-            "MaxHeapSize": {"min": 6.4e+7, "max": 4.29e+9},
-            # "MaxHeapSize": {"min": 6.4e+7, "max": 1e+9}, # 64m to 1G
-            # "InitialHeapSize": {"min": 1.25e+8, "max": 2.5e+8},
+            "MaxHeapSize": {"min": 6.4e+7, "max": 7.29e+9},
+            "InitialHeapSize": {"min": 8.0e+6, "max": 2.5e+8},
         }
+        
         self._action_mapping = {
             0: self._decrease_MaxHeapSize,
             1: self._increase_MaxHeapSize,
-            # 2: self._decrease_InitialHeapSize,
-            # 3: self._increase_InitialHeapSize,
+            2: self._decrease_InitialHeapSize,
+            3: self._increase_InitialHeapSize,
         }
+        # =====================================
 
-        assert len(list(self._action_mapping.keys())) == 2*self._num_variables
+        assert len(list(self._action_mapping.keys())) == 2*self._num_variables, f"Each flag should have 2 actions!"
         assert os.path.exists(self._gc_viewer_jar), f"{self._gc_viewer_jar} does not exist"
         assert os.path.exists(self._bm_path), f"{self._bm_path} does not exist"
         assert os.path.exists(self._jdk), f"{self._jdk} does not exist"
@@ -402,25 +407,22 @@ class JVMEnv(py_environment.PyEnvironment):
             name='observation'
         )
 
-        # It will take a while
-        self._default_goal_value = self._get_initial_goal_value()
-        self._default_state = self._get_initial_state()
+        self._default_state = self._get_default_state(mode="default")
+        self._default_goal_value = self._default_state[1]
         self._current_goal_value = self._default_goal_value
 
         """
-        A cache to store performance
-        measurements for states.
+        A cache to store performance measurements for states.
         Han, Xue & Yu, Tingting. (2020). 
         Automated Performance Tuning for Highly-Configurable Software Systems. 
 
         0: {"args": [10, 10], "goal": 234},
         1: {"args": [10, 20], "goal": 222},
         """
-        self._perf_states = {
-            0: {"args": self._default_state[0], "goal": self._default_goal_value}
-        }
-
+        self._perf_states = {}
+        self._print_welcome_msg()
         
+
     def action_spec(self):
         return self._action_spec
     
@@ -430,13 +432,14 @@ class JVMEnv(py_environment.PyEnvironment):
     def _reset(self):
         self._episode_ended = False
         self._current_goal_value = self._default_goal_value
-        self._state = self._default_state
 
+        # To ensure all elements within an object array are copied, use `copy.deepcopy`
+        self._state = copy.deepcopy(self._default_state)
         # self.ax.clear()
         # if self.render_mode == "human":
         #     self._render()
 
-        logging.debug(f"[RESET] state: {self._state}, target: {self._current_goal_value}")
+        logging.debug(f"[RESET] {self._get_info()}, target: {self._current_goal_value}")
         return ts.restart(np.array(self._state[0], dtype=np.int64))
 
     def _step(self, action):
@@ -444,38 +447,40 @@ class JVMEnv(py_environment.PyEnvironment):
             # The last action ended the episode. Ignore the current action and start
             # a new episode.
             return self.reset()
-        # Apply an action based on the mapping: decrease/increase <flag_value>
-        new_state = self._action_mapping.get(int(action))(self._state)
-        # Make sure we don't leave the boundaries
-        self._state = self._clip_state(new_state)
         
-        # Get new JVM options values after setting `self._state`
-        jvm_opts = self._update_jvm_opts()
-        # Launch a benchmark with a new JVM configuration
-        self._run(jvm_opts, self._gc_log_file, self._bm, self._bm_path, self._n)
-        # Get the goal value
-        goal = self._get_goal_value()
+        # Apply an action based on the mapping: decrease/increase <flag.value>
+        self._action_mapping.get(int(action))()
+        # Make sure we don't leave the boundaries
+        self._state = self._clip_state(self._state)
+        flags, goal = self._state_merging(self._state[0])
+
+        # # Get new JVM options values after setting `self._state`
+        # jvm_opts = self._get_jvm_opts(self._state[0])
+        # # Launch a benchmark with a new JVM configuration
+        # self._run(jvm_opts, self._gc_log_file, self._bm, self._bm_path, self._n)
+        # # Get the goal value
+        # goal = self._get_goal_from_file()
         
         previous_goal_value = self._current_goal_value
-        
+        self._state[0] = flags
         self._state[1] = goal
         self._current_goal_value = goal
 
-        # self._episode_ended = self._is_equal(self._state, self._target_location)
-        if self._current_goal_value <= self._default_goal_value // 2:
+        # ! Termination criteria
+        if self._current_goal_value <= self._default_goal_value * 0.7:
             self._episode_ended = True
 
         # ! Multiply by (-1) if lower is better
         # reward = -1 * self._current_goal_value 
         # reward = self._get_reward(self._current_goal_value, previous_goal_value)
-        reward = self._get_reward(self._current_goal_value, self._default_goal_value)
+        reward = -1 * self._get_reward(self._current_goal_value, self._default_goal_value)
         
         # self.ax.clear()
 
         # if self.render_mode == "human":
         #     self._render_frame()
 
-        logging.debug(f"[STEP] state: {self._state}, current_goal_value: {self._current_goal_value}, reward: {reward}")
+        logging.debug(f"[STEP] {self._get_info()}, current_goal_value: {self._current_goal_value}, reward: {reward}")
 
         if self._episode_ended:
             return ts.termination(
@@ -492,9 +497,7 @@ class JVMEnv(py_environment.PyEnvironment):
         state is queried and retrieved directly from the cache instead
         of re-running the benchmark utility.
         """
-        logging.debug("[_STATE_MERGING]", self._perf_states)
         saved_states = [self._perf_states[i]["args"] for i in self._perf_states.keys()]
-        logging.debug("[_STATE_MERGING]", self._perf_states)
         if flags in saved_states:
             for i in self._perf_states.keys():
                 """ 
@@ -516,13 +519,13 @@ class JVMEnv(py_environment.PyEnvironment):
                 last_index = -1
 
             # Get new JVM options values after setting `self._state`
-            jvm_opts = self._update_jvm_opts()
+            jvm_opts = self._get_jvm_opts(flags = self._state[0])
             # Launch a benchmark with a new JVM configuration
             self._run(jvm_opts, self._gc_log_file, self._bm, self._bm_path, self._n)
             # Get the goal value
-            goal = self._get_goal_value()
+            goal = self._get_goal_from_file()
             # Store a new state in the cache
-            self._perf_states[last_index + 1] = {"args": flags, "goal": goal}
+            self._perf_states[last_index + 1] = {"args": list(flags), "goal": goal}
         return flags, goal
 
     def _get_JVM_opt_value(self, opt: str):
@@ -536,50 +539,94 @@ class JVMEnv(py_environment.PyEnvironment):
         Returns:
         (int) Default JVM option value
         """
-        flags_process = subprocess.Popen(
+        opt_value = None
+
+        flags = subprocess.check_output(
             ["java", "-XX:+PrintFlagsFinal", "-version"],
-            stdout=subprocess.PIPE,
-            text=True,
-            env=self._env)
-
-        grep_process = subprocess.Popen(
-            ["grep", opt, "-m", "1"],
-            stdin=flags_process.stdout,
-            stdout=subprocess.PIPE,
             text=True)
+        
+        assert re.search(opt, flags), f"Option {opt} was not found in JVM flags"
 
-        output, error = grep_process.communicate()
-        result = re.findall("\d+", output)[0]
+        for line in flags.split('\n'):
+            if re.search(opt, line):
+                opt_value = re.findall("\d+", line)[0]
+                # TODO: Handle boolean values
+                return int(opt_value)
 
-        return int(result)
-    
-    def _get_initial_goal_value(self):
+    def _get_info(self):
+        info = {}
+        flags = list(self._flags.keys())
+        for flag in flags:
+            flag_idx = flags.index(flag)
+            flag_value = self._state[0][flag_idx]
+            info[flag] = flag_value
+        return info 
+
+    def _get_default_state(self, mode: str="default"):
         """
-        Run the benchmark with default values
-        and get a start point of the goal.
+        Get default values for each JVM option stored in `self._flags`
+        from `java -XX:+PrintFlagsFinal -version` command output.
+        Also runs a benchmark with default JVM_OPTS and get the initial
+        goal value.
+
+        Parameters:
+        mode (str): The mode of generating JVM options (default/minimum/random)
+                    where 
+                    - "default" sets JVM_OPTS default JDK options,
+                    - "minimum" sets JVM_OPTS minimum possible values,
+                    - "random" sets JVM_OPTS random values within options range.
+
+        Returns:
+        (np.array) The initial state of the Agent which stores the default
+        JVM_OPTS and its performance measurement.
+        """
+        assert mode in ["default", "minimum", "random"], f"Mode '{mode}' is not supported"
+
+        jvm_opts = []
+
+        if mode == "default":
+            for flag in self._flags.keys():
+                flag_default_value = self._get_JVM_opt_value(flag)
+                jvm_opts.append(flag_default_value)
+        elif mode == "minimum":
+            jvm_opts = self._flags_min_values.copy()
+        elif mode == "random":
+            jvm_opts = np.random.uniform(
+                low = self._flags_min_values, 
+                high = self._flags_max_values, 
+                size = (self._num_variables,))
+
+        # Performance measurement with default JVM_OPTS
+        goal = self._get_goal_value()
+        # goal = self._default_goal_value
+        initial_state = copy.deepcopy(np.array([jvm_opts, goal], dtype=object))
+        return initial_state
+    
+    def _get_goal_value(self, jvm_opts: List[str]=[]):
+        """
+        Run the benchmark with default values and 
+        get a start point of the goal.
+
+        Parameters:
+        jvm_opts (list): An array of JVM options.
+
+        Returns:
+        (int) A performance measurement (target metric 
+        or goal value).
         """
         # Run benchmark with default values
-        self._run([], self._gc_log_file, self._bm, self._bm_path, self._n)
+        self._run(jvm_opts, self._gc_log_file, self._bm, self._bm_path, self._n)
 
         if os.path.exists(self._gc_log_file):
             # Get goal value from first-time generated GC log
-            result = self._get_goal_value()
+            result = self._get_goal_from_file()
             # Clean up
             os.remove(self._gc_log_file)
             return result
         else:
             raise Exception(
                 "GC log file was not generated: please, ensure that benchmark runs correctly!")
-    
-    def _get_initial_state(self):
-        flags = []
-        for flag_name in self._flags.keys():
-            flags.append(self._get_JVM_opt_value(flag_name))
-        # goal = self._get_initial_goal_value()
-        goal = self._default_goal_value
-        initial_state = np.array([flags, goal], dtype=object)
-        return initial_state
-    
+
     def _clip_state(self, state):
         for i in range(len(state[0])):
             """ 
@@ -592,8 +639,7 @@ class JVMEnv(py_environment.PyEnvironment):
             state[0][i] = np.clip(state[0][i], min_value_i, max_value_i)
         return state
     
-    def _get_goal_value(self):
-        
+    def _get_goal_from_file(self):
         sep = ';'
         summary = "summary.csv"
         goal_value = None
@@ -618,6 +664,8 @@ class JVMEnv(py_environment.PyEnvironment):
             
         if goal_value == None:
             raise Exception(f"Goal '{self._goal}' was not found in '{summary}'!")
+        
+        if os.path.exists(summary): os.remove(summary)
                     
         return goal_value
     
@@ -632,36 +680,72 @@ class JVMEnv(py_environment.PyEnvironment):
         """
         return (next_state - current_state) / current_state
 
-    def _decrease_MaxHeapSize(self, state):
+    def _check_constraints(self, a, b, constraint):
+        problem = Problem()
+        problem.addVariable("a", [a])
+        problem.addVariable("b", [b])
+        problem.addConstraint(constraint, ("a", "b"))
+        solutions = problem.getSolutions()
+        return solutions
+
+    def _decrease_MaxHeapSize(self):
         coef = 100 * (2**10) * (2**10) # 100 Mb
-        state[0][0] -= 1 * coef
-        return state
+        Xmx = self._state[0][0] - coef
+        Xms = self._state[0][1]
+        solutions = self._check_constraints(
+            Xmx, 
+            Xms, 
+            lambda a, b: a > b)
+        
+        if len(solutions) > 0:
+            self._state[0][0] = Xmx
     
-    def _increase_MaxHeapSize(self, state):
+    def _increase_MaxHeapSize(self):
         coef = 100 * (2**10) * (2**10) # 100 Mb
-        state[0][0] += 1 * coef
-        return state
+        Xmx = self._state[0][0] + coef
+        Xms = self._state[0][1]
+        solutions = self._check_constraints(
+            Xmx, 
+            Xms, 
+            lambda a, b: a > b)
+        
+        if len(solutions) > 0:
+            self._state[0][0] = Xmx
     
-    def _decrease_InitialHeapSize(self, state):
+    def _decrease_InitialHeapSize(self):
         coef = 100 * (2**10) * (2**10) # 100 Mb
-        state[0][1] -= 1 * coef
-        return state
+        Xms = self._state[0][1] - coef
+        Xmx = self._state[0][0]
+        solutions = self._check_constraints(
+            Xmx, 
+            Xms, 
+            lambda a, b: a > b)
+        
+        if len(solutions) > 0:
+            self._state[0][1] = Xms
     
-    def _increase_InitialHeapSize(self, state):
+    def _increase_InitialHeapSize(self):
         coef = 100 * (2**10) * (2**10) # 100 Mb
-        state[0][1] += 1 * coef
-        return state
-    
+        Xms = self._state[0][1] + coef
+        Xmx = self._state[0][0]
+        solutions = self._check_constraints(
+            Xmx, 
+            Xms, 
+            lambda a, b: a > b)
+        
+        if len(solutions) > 0:
+            self._state[0][1] = Xms
+
     def _is_equal(self, state, target):
         return np.allclose(state[0], target[0])
     
-    def _update_jvm_opts(self):
+    def _get_jvm_opts(self, flags):
         jvm_opts = []
         for flag_name in self._flags.keys():
             i = list(self._flags.keys()).index(flag_name)
-            # `self._state[0]` stores an array of current
+            # `state[0]` stores an array of current
             # flag values [<MaxHeapSize>, <InitialHeapSize>]
-            flag_value = int(self._state[0][i])
+            flag_value = int(flags[i])
             # TODO: Add a condition for flags with boolean values
             jvm_opts.append(f"-XX:{flag_name}={flag_value}")
         return jvm_opts
@@ -691,13 +775,15 @@ class JVMEnv(py_environment.PyEnvironment):
         # Clean up before running the benchmark
         if os.path.exists(gc_log_file): os.remove(gc_log_file)
 
+        # Default flags
         jvm_opts.append("-XX:+UseParallelGC")
-
-        logging.debug("Running benchmark...")
+        jvm_opts.append("-XX:ParallelGCThreads=56")
+        jvm_opts.append("-XX:SurvivorRatio=124")
+        jvm_opts.append("-XX:TargetSurvivorRatio=66")
+        jvm_opts.append("-XX:MaxTenuringThreshold=15")
 
         # Run the benchmark (hide output)
         try:
-            logging.debug(f"Running {bm} with JVM_OPTS={jvm_opts}")
             subprocess.check_output(
                 ["java",
                 "-cp", bm_path,
@@ -714,6 +800,7 @@ class JVMEnv(py_environment.PyEnvironment):
         return
     
     def _render(self): 
+
         self.fig, self.ax = plt.subplots()
         self.line, = self.ax.plot([], [])
         self.ax.set_xlabel('X')
@@ -735,3 +822,14 @@ class JVMEnv(py_environment.PyEnvironment):
         self.ax.legend()
         clear_output(wait=True)
         display(self.fig)
+    
+    def _print_welcome_msg(self):
+        print("Successfully initialized a JVM Environment!\n",
+              f"JDK: {self._jdk},\n",
+              f"Benchmark: {self._bm} ({self._bm_path}),\n",
+              f"Number of iterations: {self._n},\n",
+              f"Goal: {self._goal},\n",
+              f"Number of JVM options: {self._num_variables},\n",
+              f"JVM options: {self._flags},\n",
+              f"Env. default state: {self._default_state},\n",
+              f"Env. default goal value: {self._default_goal_value},\n",)
