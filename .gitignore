@@ -1,1 +1,6 @@
 gc-ml-env/*
+jdk-*/*
+tmp/*
+dacapo/*
+__pycache__/*
+scratch/*

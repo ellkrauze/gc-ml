@@ -21,7 +21,7 @@ from tf_agents.specs import array_spec
 from tf_agents.environments import py_environment
 from tf_agents.trajectories import time_step as ts
 
-logging.basicConfig(format='%(asctime)s-ENV-%(levelname)s-%(message)s', level=logging.DEBUG, datefmt='%Y-%m-%d %H:%M:%S')
+# logging.basicConfig(format='%(asctime)s-ENV-%(levelname)s-%(message)s', level=logging.DEBUG, datefmt='%Y-%m-%d %H:%M:%S')
 
 class CurveEnv(py_environment.PyEnvironment):
     
@@ -345,6 +345,7 @@ class JVMEnv(py_environment.PyEnvironment):
             self,
             jdk: str,
             bm_path: str,
+            callback_path: str,
             bm: str = "cassandra",
             n: int = 5,
             goal: str = "avgGCPause",
@@ -357,6 +358,7 @@ class JVMEnv(py_environment.PyEnvironment):
         self._verbose = verbose
         self._bm = bm
         self._bm_path = bm_path
+        self._callback_path = callback_path
         self._gc_log_file = f"gc-{self._bm}.txt"
         self._n = n
         self._goal = goal
@@ -368,18 +370,23 @@ class JVMEnv(py_environment.PyEnvironment):
         # ============= F L A G S =============
         # TODO: Add more flags
         # TODO: Find min and max values for flags
-        # TODO: (256 MB, 512 MB, 1024 MB, 2048 MB, 4096 MB, and 8192 MB).
         self._num_variables = 2
         self._flags = {
-            "MaxHeapSize": {"min": 6.4e+7, "max": 7.29e+9},
-            "InitialHeapSize": {"min": 8.0e+6, "max": 2.5e+8},
+            "MaxTenuringThreshold": {"min": 1, "max": 16},
+            "ParallelGCThreads": {"min": 20, "max": 48},
+            # "MaxHeapSize": {"min": 6.4e+7, "max": 5.0e+10},
+            # "InitialHeapSize": {"min": 8.0e+6, "max": 4.0e+8},
         }
         
         self._action_mapping = {
-            0: self._decrease_MaxHeapSize,
-            1: self._increase_MaxHeapSize,
-            2: self._decrease_InitialHeapSize,
-            3: self._increase_InitialHeapSize,
+            0: self._decrease_MaxTenuringThreshold,
+            1: self._increase_MaxTenuringThreshold,
+            2: self._decrease_ParallelGCThreads,
+            3: self._increase_ParallelGCThreads,
+            # 0: self._decrease_MaxHeapSize,
+            # 1: self._increase_MaxHeapSize,
+            # 2: self._decrease_InitialHeapSize,
+            # 3: self._increase_InitialHeapSize,
         }
         # =====================================
 
@@ -472,22 +479,31 @@ class JVMEnv(py_environment.PyEnvironment):
 
         # ! Multiply by (-1) if lower is better
         # reward = -1 * self._current_goal_value 
-        # reward = self._get_reward(self._current_goal_value, previous_goal_value)
-        reward = -1 * self._get_reward(self._current_goal_value, self._default_goal_value)
+        self._reward = -1 * self._get_reward(self._current_goal_value, previous_goal_value)
+        # self._reward = -1 * self._get_reward(self._current_goal_value, self._default_goal_value)
         
+        # self._reward = -1 * (
+        #     self._get_reward(self._current_goal_value, previous_goal_value) 
+        #     + self._get_reward(self._current_goal_value, self._default_goal_value) 
+        # )
+        # self._reward = 1 if self._current_goal_value < self._default_goal_value else -10
+
         # self.ax.clear()
 
         # if self.render_mode == "human":
         #     self._render_frame()
 
-        logging.debug(f"[STEP] {self._get_info()}, current_goal_value: {self._current_goal_value}, reward: {reward}")
+        logging.debug(f"[STEP] {self._get_info()}, current_goal_value: {self._current_goal_value}, reward: {self._reward}")
 
-        if self._episode_ended:
-            return ts.termination(
-                np.array(self._state[0], dtype=np.int64), reward)
-        else:
-            return ts.transition(
-                np.array(self._state[0], dtype=np.int64), reward=0.0, discount=1.0)
+        # if self._episode_ended:
+        #     return ts.termination(
+        #         np.array(self._state[0], dtype=np.int64), self._reward)
+        # else:
+        #     return ts.transition(
+        #         np.array(self._state[0], dtype=np.int64), reward=0.0, discount=1.0)
+
+        return ts.transition(
+                np.array(self._state[0], dtype=np.int64), reward=self._reward, discount=0.9999)
     
     def _state_merging(self, flags):
         """
@@ -521,7 +537,7 @@ class JVMEnv(py_environment.PyEnvironment):
             # Get new JVM options values after setting `self._state`
             jvm_opts = self._get_jvm_opts(flags = self._state[0])
             # Launch a benchmark with a new JVM configuration
-            self._run(jvm_opts, self._gc_log_file, self._bm, self._bm_path, self._n)
+            self._run(jvm_opts, self._gc_log_file, self._bm, self._bm_path, self._callback_path, self._n)
             # Get the goal value
             goal = self._get_goal_from_file()
             # Store a new state in the cache
@@ -543,7 +559,8 @@ class JVMEnv(py_environment.PyEnvironment):
 
         flags = subprocess.check_output(
             ["java", "-XX:+PrintFlagsFinal", "-version"],
-            text=True)
+            text=True, 
+            env=self._env)
         
         assert re.search(opt, flags), f"Option {opt} was not found in JVM flags"
 
@@ -615,7 +632,7 @@ class JVMEnv(py_environment.PyEnvironment):
         or goal value).
         """
         # Run benchmark with default values
-        self._run(jvm_opts, self._gc_log_file, self._bm, self._bm_path, self._n)
+        self._run(jvm_opts, self._gc_log_file, self._bm, self._bm_path, self._callback_path, self._n)
 
         if os.path.exists(self._gc_log_file):
             # Get goal value from first-time generated GC log
@@ -736,6 +753,22 @@ class JVMEnv(py_environment.PyEnvironment):
         if len(solutions) > 0:
             self._state[0][1] = Xms
 
+    def _decrease_MaxTenuringThreshold(self):
+        coef = 3
+        self._state[0][0] -= coef
+    
+    def _increase_MaxTenuringThreshold(self):
+        coef = 3
+        self._state[0][0] += coef
+    
+    def _decrease_ParallelGCThreads(self):
+        coef = 4
+        self._state[0][1] -= coef
+    
+    def _increase_ParallelGCThreads(self):
+        coef = 4
+        self._state[0][1] += coef
+
     def _is_equal(self, state, target):
         return np.allclose(state[0], target[0])
     
@@ -756,6 +789,7 @@ class JVMEnv(py_environment.PyEnvironment):
             gc_log_file: str, 
             bm: str, 
             bm_path: str, 
+            callback_path: str,
             n: int=5, 
             verbose: bool=False):
         """
@@ -777,16 +811,16 @@ class JVMEnv(py_environment.PyEnvironment):
 
         # Default flags
         jvm_opts.append("-XX:+UseParallelGC")
-        jvm_opts.append("-XX:ParallelGCThreads=56")
-        jvm_opts.append("-XX:SurvivorRatio=124")
+        jvm_opts.append("-Xmx16G")
+        jvm_opts.append("-Xms16G")
+        jvm_opts.append("-XX:SurvivorRatio=130")
         jvm_opts.append("-XX:TargetSurvivorRatio=66")
-        jvm_opts.append("-XX:MaxTenuringThreshold=15")
 
         # Run the benchmark (hide output)
         try:
             subprocess.check_output(
                 ["java",
-                "-cp", bm_path,
+                "-cp", f"{callback_path}:{bm_path}",
                 f"-Xlog:gc*=trace:file={gc_log_file}:tags,time,uptime,level",
                 *jvm_opts,
                 "-Dvmstat.enable_jfr=yes",
