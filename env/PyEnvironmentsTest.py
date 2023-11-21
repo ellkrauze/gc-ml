@@ -168,12 +168,12 @@ class JVMEnv(py_environment.PyEnvironment):
         # self._reward = -1 * self._get_reward(self._current_goal_value, previous_goal_value)
         # logging.debug(f"[STEP] {self._get_info()}, current_goal_value: {self._current_goal_value}, reward: {self._reward}")
         
-        # if self._current_goal_value < self._default_goal_value * 0.9:
-        #     return ts.termination(
-        #         np.array(self._state[0], dtype=np.int64), reward=self._reward)
-        # else:
-        return ts.transition(
-            np.array(self._state[0], dtype=np.int64), reward=self._reward, discount=0.5)
+        if self._current_goal_value < self._default_goal_value * 0.9:
+            return ts.termination(
+                np.array(self._state[0], dtype=np.int64), reward=self._reward)
+        else:
+            return ts.transition(
+                np.array(self._state[0], dtype=np.int64), reward=self._reward, discount=0.5)
     
     def _state_merging(self, flags):
         """
