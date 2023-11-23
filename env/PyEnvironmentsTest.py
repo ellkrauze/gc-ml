@@ -156,12 +156,12 @@ class JVMEnv(py_environment.PyEnvironment):
         if self._current_goal_value >= self._default_goal_value:
             self._reward = -1
         else:
-            self._reward = -1 * self._current_goal_value
+            # self._reward = -1 * self._current_goal_value
             # self._reward = -1 * (
             #     self._get_reward(self._current_goal_value, previous_goal_value) 
             #     + self._get_reward(self._current_goal_value, self._default_goal_value) 
             # )
-            # self._reward = -1 * self._get_reward(self._current_goal_value, self._default_goal_value)
+            self._reward = -1 * self._get_reward(self._current_goal_value, self._default_goal_value)
             # self._reward = -1 * self._get_reward(self._current_goal_value, previous_goal_value)
 
         # ! Multiply by (-1) if lower is better
