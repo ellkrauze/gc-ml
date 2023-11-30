@@ -46,7 +46,7 @@ The following steps describe how to run a DaCapo benchmark, get Garbage Collecto
 
 In case you want to run the benchmarks and visualize the data, follow these steps.
 
-1. Run DaCapo benchmarks on your machine using downloaded JDK and dacapo-bench.jar. 
+1. **Get GC logs from benchmark.** Run DaCapo benchmarks on your machine using downloaded JDK and dacapo-bench.jar. 
 [run_dacapo.sh](scripts/run_dacapo.sh)
 ```
 # Training data (avrora becnhmark)
@@ -55,7 +55,7 @@ bash scripts/run_dacapo.sh jdk-11.0.20.8 dacapo-bench.jar callback gc-logs avror
 # Evaluation data (kafka becnhmark)
 bash scripts/run_dacapo.sh jdk-11.0.20.8 dacapo-bench.jar callback gc-logs kafka
 ```
-2. Preprocess collected GC logs stored in `gc-logs` directory using downloaded GCViewer jar file.
+2. **Get summaries.** Preprocess collected GC logs stored in `gc-logs` directory using downloaded GCViewer jar file.
 [get_summary.sh](scripts/get_summary.sh)
 ```
 # Training data (avrora becnhmark)
@@ -64,7 +64,7 @@ bash scripts/get_summary.sh jdk-11.0.20.8 gcviewer-1.36.jar avrora
 # Evaluation data (kafka becnhmark)
 bash scripts/get_summary.sh jdk-11.0.20.8 gcviewer-1.36.jar kafka
 ```
-3. Parse files stored in `summaries_avrora` and `summaries_kafka` directories using `get_data_from_csv()` method from [utils](utils/dataset_util.py).
+3. **Get the goals from summaries.** Parse files stored in `summaries_avrora` and `summaries_kafka` directories using `get_data_from_csv()` method from [utils](utils/dataset_util.py).
 ```
 # Example from dataset_util.ipynb
 target_goal = "avgGCPause"
