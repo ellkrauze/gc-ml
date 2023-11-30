@@ -34,8 +34,8 @@ def get_data_from_csv(csv_dir: str, goal: str):
                     goal_value = line.split(sep)[1].replace(',','')
                     goal_value = float(goal_value)
 
-        flag_1_values.append(p)
-        flag_2_values.append(m)
+        flag_1_values.append(int(p))
+        flag_2_values.append(int(m))
         goal_values.append(goal_value) 
 
     return flag_1_values, flag_2_values, goal_values
