@@ -13,7 +13,6 @@ def plot_dataset(rb, flags=None):
     """
 
     observations = rb.gather_all()[1].numpy()
-    rewards = rb.gather_all()[5].numpy()
 
     if not flags:
         flags = ["MaxTenuringThreshold", "ParallelGCThreads"]
@@ -25,8 +24,10 @@ def plot_dataset(rb, flags=None):
     x = df.pivot_table(index=flags[0], columns=flags[1],aggfunc='size',fill_value=0)
     idx = x.max(axis=1).sort_values(ascending=0).index
     sns.heatmap(x, annot=True, ax=ax, fmt="")
+    ax.invert_yaxis()
     plt.show()
     return
+
 
 def plot_goal_heatmap(env, flags=None, goal: str="Average GC Pause"):
     if flags:
@@ -45,6 +46,24 @@ def plot_goal_heatmap(env, flags=None, goal: str="Average GC Pause"):
         flags[0]: X, 
         flags[1]: Y, 
         goal: Z})
+    data_pivoted = data.pivot(index=flags[0], columns=flags[1], values=goal)
+    ax = sns.heatmap(data_pivoted, annot=True, ax=ax, fmt=".2f")
+    ax.invert_yaxis()
+    plt.show()
+
+def plot_heatmap(x, y, z, flags=None, goal: str="Average GC Pause"):
+    if flags:
+        assert len(flags) == 2, "This function supports only a 2D heatmap"
+    else:
+        flags = ["MaxTenuringThreshold", "ParallelGCThreads"]
+    import seaborn as sns
+    fig, ax = plt.subplots(figsize=(5, 5))
+    
+    data = pd.DataFrame({
+        flags[0]: x, 
+        flags[1]: y, 
+        goal: z})
+    
     data_pivoted = data.pivot(index=flags[0], columns=flags[1], values=goal)
     ax = sns.heatmap(data_pivoted, annot=True, ax=ax, fmt=".2f")
     ax.invert_yaxis()
