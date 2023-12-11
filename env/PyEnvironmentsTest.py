@@ -1,52 +1,46 @@
-import math
 import os
 import re
-import sys
-import gym
-import random
-import requests
-import json
 import copy
 import subprocess
 import logging
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import scipy.optimize as optimize
 from constraint import *
-from typing import List
-from IPython.display import display, clear_output
+from typing import Any, Dict, List
+from tf_agents.typing import types
+from tf_agents.trajectories import TimeStep
 from tf_agents.specs import array_spec
 from tf_agents.environments import py_environment
 from tf_agents.trajectories import time_step as ts
+
 
 class JVMEnv(py_environment.PyEnvironment):
     
     def __init__(
             self,
-            jdk: str,
+            jdk_path: str,
             bm_path: str,
+            gc_viewer_jar: str,
             callback_path: str,
-            bm: str = "cassandra",
+            bm_name: str = "cassandra",
             n: int = 5,
             goal: str = "avgGCPause",
-            verbose: bool=False
-        ):
-        
-        self._jdk = os.path.join(jdk, "bin")
-        # self._state = 0
-        self._episode_ended = False
-        self._verbose = verbose
-        self._bm = bm
-        self._bm_path = bm_path
+            verbose: bool = False,
+    ):
+        # TODO: Write a Class description with attributes
+        self.jdk = jdk_path
+        self.bm_path = bm_path
+        self.gc_viewer_jar = gc_viewer_jar
         self._callback_path = callback_path
+        self._bm = bm_name
         self._gc_log_file = f"gc-{self._bm}.txt"
         self._n = n
         self._goal = goal
+        self._verbose = verbose
 
         self._env = os.environ.copy()
-        self._env["PATH"] = f"{self._jdk}:{self._env['PATH']}"
-        self._gc_viewer_jar = "gcviewer-1.36.jar"
+        self._env["PATH"] = f"{self.jdk}:{self._env['PATH']}"
+        self._episode_ended = False
 
         # ============= F L A G S =============
         # TODO: Add more flags
@@ -56,7 +50,7 @@ class JVMEnv(py_environment.PyEnvironment):
             "MaxTenuringThreshold": {"min": 1, "max": 16},
             "ParallelGCThreads": {"min": 4, "max": 24},
         }
-        
+
         self._action_mapping = {
             0: self._decrease_MaxTenuringThreshold,
             1: self._increase_MaxTenuringThreshold,
@@ -65,11 +59,8 @@ class JVMEnv(py_environment.PyEnvironment):
         }
         # =====================================
 
-        assert len(list(self._action_mapping.keys())) == 2*self._num_variables, f"Each flag should have 2 actions!"
-        assert os.path.exists(self._gc_viewer_jar), f"{self._gc_viewer_jar} does not exist"
-        assert os.path.exists(self._bm_path), f"{self._bm_path} does not exist"
-        assert os.path.exists(self._jdk), f"{self._jdk} does not exist"
-        
+        assert len(self._action_mapping) == 2*self._num_variables, "Each flag should have 2 actions!"
+
         self._flags_min_values = [self._flags[i]["min"] for i in self._flags.keys()]
         self._flags_max_values = [self._flags[i]["max"] for i in self._flags.keys()]
 
@@ -90,91 +81,146 @@ class JVMEnv(py_environment.PyEnvironment):
         )
 
         self._default_state = self._get_default_state(mode="default")
-        self._default_goal_value = self._default_state[1]
-        self._current_goal_value = self._default_goal_value
 
         """
         A cache to store performance measurements for states.
         Han, Xue & Yu, Tingting. (2020). 
         Automated Performance Tuning for Highly-Configurable Software Systems. 
 
-        0: {"args": [10, 10], "goal": 234},
-        1: {"args": [10, 20], "goal": 222},
+        0: {"args": [10, 10], "goal": 234, "count": 1},
+        1: {"args": [10, 20], "goal": 222, "count": 4},
+        ...
         """
-        # new_df = pd.read_csv("samara_saved_states.csv")
-        new_df = pd.read_csv(f"{self._bm}_synthetic_saved_states.csv")
-        self._perf_states  = {}
-
-        for i in range(len(new_df)):
-            self._perf_states [i] = {"args": [new_df["MaxTenuringThreshold"].values[i], new_df["ParallelGCThreads"].values[i]], "goal": new_df["Average GC Pause"].values[i]}
+        
+        # For offline RL: if you already have a dataset file with trajectories.
+        self._new_df = pd.read_csv(
+            f"datasets/{self._bm}_synthetic_saved_states.csv")
+        
+        # self._new_df = pd.read_csv(
+        #     f"datasets/{self._bm}_real_saved_states.csv")
+        
+        self._perf_states = {}
+        self._perf_states[0] = {
+            "args": self._default_state[0],
+            "goal": self._default_state[1],
+            "count": 1}
 
         self._print_welcome_msg()
+    
+    @property
+    def jdk(self):
+        return self._jdk
+    
+    @jdk.setter
+    def jdk(self, path: str):
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+        self._jdk = os.path.join(path, "bin")
         
-
+    @property
+    def bm_path(self):
+        return self._bm_path
+    
+    @bm_path.setter
+    def bm_path(self, path: str):
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+        self._bm_path = os.path.join(path)
+    
+    @property
+    def gc_viewer_jar(self):
+        return self._gc_viewer_jar
+    
+    @gc_viewer_jar.setter
+    def gc_viewer_jar(self, path: str):
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+        self._gc_viewer_jar = os.path.join(path)
+    
     def action_spec(self):
+        """Get the actions that should be provided to `step()`."""
         return self._action_spec
     
     def observation_spec(self):
+        """Get the the observations provided by the environment."""
         return self._observation_spec
     
+    @property
+    def performance_states(self) -> Dict[int, Any]:
+        return self._perf_states
+        
     def _reset(self):
-        self._episode_ended = False
-        self._current_goal_value = self._default_goal_value
+        """
+        Resets the environment state.
 
+        This method must be called before :func:`step()`.
+
+        Returns:
+            A `TimeStep` namedtuple containing:
+                step_type: A `StepType` of `FIRST`.
+                reward: 0.0, indicating the reward.
+                discount: 1.0, indicating the discount.
+                observation: A NumPy array, or a nested dict, list or tuple of arrays
+                corresponding to `observation_spec()`.
+        """
+        self._episode_ended = False
+        
         # To ensure all elements within an object array are copied, use `copy.deepcopy`
         self._state = copy.deepcopy(self._default_state)
-        # self.ax.clear()
-        # if self.render_mode == "human":
-        #     self._render()
 
-        logging.debug(f"[RESET] {self._get_info()}, target: {self._current_goal_value}")
+        logging.debug(f"[RESET] {self._get_info()}, target: {self._state[1]}")
         return ts.restart(np.array(self._state[0], dtype=np.int64))
 
-    def _step(self, action):
+    def _step(self, action: types.NestedArray):
+        """Updates the environment according to action.
+
+        Parameters:
+            action: A NumPy array, or a nested dict, list or tuple of arrays
+                corresponding to `action_spec()`.
+        Returns:
+            A `TimeStep` namedtuple containing:
+                step_type: A `StepType` of `FIRST`.
+                reward: 0.0, indicating the reward.
+                discount: 1.0, indicating the discount.
+                observation: A NumPy array, or a nested dict, list or tuple of arrays
+                corresponding to `observation_spec()`.
+        """
         if self._episode_ended:
-            # The last action ended the episode. Ignore the current action and start
-            # a new episode.
+            # The last action ended the episode. 
+            # Ignore the current action and start a new episode.
+            logging.debug(f"[EPISODE ENDED] {self._get_info()}, target: {self._state[1]}")
             return self.reset()
-        
-        # Apply an action based on the mapping: decrease/increase <flag.value>
+              
+        # Apply an action based on the mapping: decrease/increase <flag.value>.
         self._action_mapping.get(int(action))()
-        # Make sure we don't leave the boundaries
+
+        # Make sure we don't leave the boundaries.
         self._state = self._clip_state(self._state)
+        
+        # Check if the current JVM configuration is cached.
+        # Add `state` to cache if new.
         flags, goal = self._state_merging(self._state[0])
         
-        previous_goal_value = self._current_goal_value
-        self._state[0] = flags
-        self._state[1] = goal
-        self._current_goal_value = goal
+        # Update `state` value.
+        self._state[0], self._state[1] = flags, goal
 
-        # ! Termination criteria
-        if self._current_goal_value <= self._default_goal_value * 0.7:
+        # Termination criteria
+        if self._state[1] <= self._default_state[1] * 0.04:
             self._episode_ended = True
 
-        # ! Multiply by (-1) if lower is better
-        # self._reward = -1 * self._current_goal_value
-        if self._current_goal_value >= self._default_goal_value:
-            self._reward = -1
-        else:
-            # self._reward = -1 * self._current_goal_value
-            # self._reward = -1 * (
-            #     self._get_reward(self._current_goal_value, previous_goal_value) 
-            #     + self._get_reward(self._current_goal_value, self._default_goal_value) 
-            # )
-            self._reward = -1 * self._get_reward(self._current_goal_value, self._default_goal_value)
-            # self._reward = -1 * self._get_reward(self._current_goal_value, previous_goal_value)
-
-        # ! Multiply by (-1) if lower is better
-        # self._reward = -1 * self._get_reward(self._current_goal_value, previous_goal_value)
-        # logging.debug(f"[STEP] {self._get_info()}, current_goal_value: {self._current_goal_value}, reward: {self._reward}")
+        self._reward = self._get_reward(
+            current_state=self._state,
+            previous_state=self._default_state,
+            lower_is_better=True,
+            beta=0.0) # ! No intrinsic reward
         
-        if self._current_goal_value < self._default_goal_value * 0.9:
+        if self._episode_ended:
             return ts.termination(
-                np.array(self._state[0], dtype=np.int64), reward=self._reward)
+                np.array(self._state[0], dtype=np.int64), reward=2.0)
         else:
             return ts.transition(
                 np.array(self._state[0], dtype=np.int64), reward=self._reward, discount=0.5)
-    
+
     def _state_merging(self, flags):
         """
         Store states' JVM configurations and performance measurements
@@ -183,9 +229,10 @@ class JVMEnv(py_environment.PyEnvironment):
         state is queried and retrieved directly from the cache instead
         of re-running the benchmark utility.
         """
-        saved_states = [self._perf_states[i]["args"] for i in self._perf_states.keys()]
+        saved_states = [self._perf_states[i]["args"]
+                        for i in self._perf_states.keys()]
         if flags == self._default_state[0]:
-            goal = self._default_goal_value
+            goal = self._default_state[1]
         elif flags in saved_states:
             for i in self._perf_states.keys():
                 """ 
@@ -193,6 +240,7 @@ class JVMEnv(py_environment.PyEnvironment):
                 update the state goal value.
                 """
                 if flags == self._perf_states[i]["args"]:
+                    self._perf_states[i]["count"] += 1
                     goal = self._perf_states[i]["goal"]
         elif flags not in saved_states:
             """ 
@@ -200,9 +248,28 @@ class JVMEnv(py_environment.PyEnvironment):
             measure the performance metric, and save it
             in the cache.
             """
-            raise Exception("Flags are not in saved_states!")
+            try:
+                last_index = list(self._perf_states.keys())[-1]
+            except IndexError:
+                # If `self._perf_states` is empty
+                last_index = -1
+
+            # Launch a benchmark with a new JVM configuration
+            goal = self._synthetic_run(flags)
+            # Store a new state in the cache, count = 1.
+            self._perf_states[last_index + 1] = {
+                "args": list(flags), "goal": goal, "count": 1}
+            # print(self._perf_states)
         return flags, goal
 
+    def _synthetic_run(self, flags):
+        assert len(flags) == 2, "Amount of flags is not 2"
+        row = self._new_df[(
+            (self._new_df["MaxTenuringThreshold"] == flags[0]) 
+            & (self._new_df["ParallelGCThreads"] == flags[1]))].values.squeeze()
+        goal = row[2]
+        return goal
+    
     def _get_JVM_opt_value(self, opt: str):
         """
         Get the defaul JVM option value from environment
@@ -262,6 +329,8 @@ class JVMEnv(py_environment.PyEnvironment):
             return np.array([[7, 12], 0.47], dtype=object)
         elif self._bm == "kafka":
             return np.array([[7, 12], 0.34], dtype=object)
+        elif self._bm == "test":
+            return np.array([[7, 12], 0.57], dtype=object)
     
     def _get_goal_value(self, jvm_opts: List[str]=[]):
         """
@@ -276,7 +345,7 @@ class JVMEnv(py_environment.PyEnvironment):
         or goal value).
         """
         # Run benchmark with default values
-        self._run(jvm_opts, self._gc_log_file, self._bm, self._bm_path, self._callback_path, self._n)
+        self._run(jvm_opts, self._gc_log_file, self._bm, self.bm_path, self._callback_path, self._n)
 
         if os.path.exists(self._gc_log_file):
             # Get goal value from first-time generated GC log
@@ -306,7 +375,7 @@ class JVMEnv(py_environment.PyEnvironment):
         goal_value = None
         subprocess.call(
             ["java",
-            "-cp", self._gc_viewer_jar,
+            "-cp", self.gc_viewer_jar,
             "com.tagtraum.perf.gcviewer.GCViewer",
             self._gc_log_file,
             summary, 
@@ -330,16 +399,54 @@ class JVMEnv(py_environment.PyEnvironment):
                     
         return goal_value
     
-    def _get_reward(self, next_state, current_state):
+    def _get_reward(
+        self,
+        current_state: np.array,
+        previous_state: np.array,
+        lower_is_better: bool = False,
+        beta: float = 1.0,
+    ):
         """
-        The reward is the relative difference between
-        a current agent value and the next one. The 
-        normalization puts a large measurement range on the
-        same scale.
+        Get the environment reward. The reward is composed of two terms:
+            `reward = reward_ex + beta * reward_in`,
+        where `beta` is a hyperparameter adjusting the balance between
+        exploitation and exploration.
+        - reward_ex is an extrinsic reward from the environment at time `t`.
+        - reward_in is an intrinsic exploration bonus.
+        Parameters:
+            current_state (np.array):   Current state containing JVM flags
+                                        and goal value.
+            previous_state (np.array):  Previous state containing JVM flags
+                                        and goal value.
+            lower_is_better (bool):     Whether to consider lower goal values
+                                        better than larger ones. So that reward
+                                        is positive.
+            beta (float):               Importance of instrinsic rewards ([0.0, 1.0]).
+        Returns:
+            reward (float):             An environment reward value at current
+                                        time step.
+        """
+        coef = 1
+        reward_in = 0  # Intrinsic reward.
+        reward_ex = 0  # Extrinsic reward.
         
-        Han, Xue & Yu, Tingting. (2020). Automated Performance Tuning for Highly-Configurable Software Systems. 
-        """
-        return (next_state - current_state) / current_state
+        # TODO: Check if beta is in range [0, 1]
+        
+        if lower_is_better:
+            coef = -1
+        
+        if coef * current_state[1] <= previous_state[1]:
+            for i in self._perf_states.keys():
+                if self._perf_states[i]["args"] == current_state[0]:
+                    # First, we add the state to cache with count=1,
+                    # but we haven't run the benchmark with it yet,
+                    # so it is fair to say that actually count is 0.
+                    count = self._perf_states[i]["count"] - 1
+                    reward_in = (count + 0.01)**(-1/2)
+        reward_ex = coef * (current_state[1] - previous_state[1]) / previous_state[1]
+        reward = reward_ex + beta * reward_in
+        reward = round(reward, 4)
+        return reward
 
     def _check_constraints(self, a, b, constraint):
         problem = Problem()
@@ -354,24 +461,28 @@ class JVMEnv(py_environment.PyEnvironment):
         coef = 3
         saved_values = [self._perf_states[i]["args"][idx] for i in self._perf_states.keys()]
         self._state[0][idx] = min(saved_values, key=lambda x: abs(x - (self._state[0][idx] - coef)))
+        self._state[0][idx] -= coef
     
     def _increase_MaxTenuringThreshold(self):
         idx = 0
         coef = 3
         saved_values = [self._perf_states[i]["args"][idx] for i in self._perf_states.keys()]
         self._state[0][idx] = min(saved_values, key=lambda x: abs(x - (self._state[0][idx] + coef)))
+        self._state[0][idx] += coef
     
     def _decrease_ParallelGCThreads(self):
         idx = 1
         coef = 4
         saved_values = [self._perf_states[i]["args"][idx] for i in self._perf_states.keys()]
         self._state[0][idx] = min(saved_values, key=lambda x: abs(x - (self._state[0][idx] - coef)))
+        self._state[0][idx] -= coef
     
     def _increase_ParallelGCThreads(self):
         idx = 1
         coef = 4
         saved_values = [self._perf_states[i]["args"][idx] for i in self._perf_states.keys()]
         self._state[0][idx] = min(saved_values, key=lambda x: abs(x - (self._state[0][idx] + coef)))
+        self._state[0][idx] += coef
 
     def _is_equal(self, state, target):
         return np.allclose(state[0], target[0])
@@ -389,13 +500,13 @@ class JVMEnv(py_environment.PyEnvironment):
 
     def _run(
             self, 
-            jvm_opts: List[str], 
-            gc_log_file: str, 
-            bm: str, 
-            bm_path: str, 
+            jvm_opts: List[str],
+            gc_log_file: str,
+            bm: str,
+            bm_path: str,
             callback_path: str,
-            n: int=5, 
-            verbose: bool=False):
+            n: int = 5,
+            verbose: bool = False):
         """
         Run a benchmark with the specified JVM options
         such as MaxHeapSize.
@@ -409,10 +520,14 @@ class JVMEnv(py_environment.PyEnvironment):
         n (int):                  Total number of benchmark's iterations.
         verbose (bool):           Print debug messages.
         """
-
+        
+        if not os.path.exists(callback_path):
+            raise FileNotFoundError(callback_path)
+        
         # Clean up before running the benchmark
-        if os.path.exists(gc_log_file): os.remove(gc_log_file)
-
+        if os.path.exists(gc_log_file):
+            os.remove(gc_log_file)
+        
         # Default flags
         jvm_opts.append("-XX:+UseParallelGC")
         jvm_opts.append("-Xmx16G")
@@ -437,37 +552,17 @@ class JVMEnv(py_environment.PyEnvironment):
 
         return
     
-    def _render(self): 
-
-        self.fig, self.ax = plt.subplots()
-        self.line, = self.ax.plot([], [])
-        self.ax.set_xlabel('X')
-        self.ax.set_ylabel('Y')
-        self.ax.set_title('Agent Learning Curve Navigation')
-         
-        x_vals = np.linspace(self._low, self._high)
-        y_vals = [self._y(x) for x in x_vals]
-        
-        self.ax.clear()
-        self.ax.grid(True)
-        self.ax.plot(x_vals, y_vals, color='black')
-        self.ax.scatter(self._target_location[0], self._target_location[1], color='red', label="Target")
-        self.ax.scatter(self._state[0], self._state[1], color='blue', label="Agent")
-        
-        self.ax.set_xlabel('X')
-        self.ax.set_ylabel('Y')
-        self.ax.set_title('Agent Learning Curve Navigation')
-        self.ax.legend()
-        clear_output(wait=True)
-        display(self.fig)
+    def _render(self):
+        raise NotImplementedError(
+            "This environment has not implemented `render().'")
     
     def _print_welcome_msg(self):
         print("Successfully initialized a JVM Environment!\n",
-              f"JDK: {self._jdk},\n",
-              f"Benchmark: {self._bm} ({self._bm_path}),\n",
+              f"JDK: {self.jdk},\n",
+              f"Benchmark: {self._bm} ({self.bm_path}),\n",
               f"Number of iterations: {self._n},\n",
               f"Goal: {self._goal},\n",
               f"Number of JVM options: {self._num_variables},\n",
               f"JVM options: {self._flags},\n",
               f"Env. default state: {self._default_state},\n",
-              f"Env. default goal value: {self._default_goal_value},\n",)
+              f"Env. default goal value: {self._default_state[1]},\n",)
