@@ -4,7 +4,8 @@ import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-def get_data_from_csv(csv_dir: str, goal: str):
+
+def get_data_from_csv(csv_dir: str, goals):
     """Parse each summary.csv file stored in `csv_dir`.
     Directory `csv_dir` shall contain summary files
     that describe performance metrics for certain 
@@ -16,8 +17,9 @@ def get_data_from_csv(csv_dir: str, goal: str):
     Args:
         csv_dir (str):  Path to a directory that contains
             summary*.csv files from gcviewer.jar.
-        goal (str):     A key name.
+        goal (list):     A list of key names.
     """
+    assert goals is not None, "`goals` should be a list of strings, not None"
     sep = ';'
     flag_1_values = []
     flag_2_values = []
@@ -28,18 +30,19 @@ def get_data_from_csv(csv_dir: str, goal: str):
         p, m = basename.split('_')[-2], basename.split('_')[-1]
         summary_abs_path = os.path.join(csv_dir, summary)
 
-        with open(summary_abs_path, "+r") as summary_file:
-            for line in summary_file.readlines():
-                if goal + sep in line:
-                    goal_value = line.split(sep)[1].replace(',','')
-                    goal_value = float(goal_value)
-
+        summary_df = (pd
+                      .read_csv(
+                          summary_abs_path, sep=sep, skiprows=1, header=None)
+                      .replace(',', '', regex=True)
+                      .replace('n.a.', 'NaN', regex=True))
+        params = summary_df[summary_df[0].isin(goals)][1].astype(float).values
+        assert len(goals) == len(params), "Check if goal name is in summary"
+        
         flag_1_values.append(int(p))
         flag_2_values.append(int(m))
-        goal_values.append(goal_value) 
+        goal_values.append(params)
 
     return flag_1_values, flag_2_values, goal_values
-
 
 def read_single_log(key, filename):
   """bench: avg"""
