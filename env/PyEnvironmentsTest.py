@@ -74,12 +74,12 @@ class JVMEnv(py_environment.PyEnvironment):
         )
 
         self._observation_spec = array_spec.BoundedArraySpec(
-            shape=(self._num_variables + 1 + 4,),  # 1 goal, 4 external vars
+            shape=(self._num_variables + 1 + 7,),  # 1 goal, {X} external vars
             dtype=np.float32,
             # minimum=self._flags_min_values,
             # maximum=self._flags_max_values,
-            minimum=[1, 4, 0.0, 0.0, 0.0, 0.0, 0.0],
-            maximum=[16, 24, 3.0, 200.0, 5.0, 30.0, 30.0],
+            # minimum=[1, 4, 0.0, 0.0, 0.0, 0.0, 0.0],
+            # maximum=[16, 24, 3.0, 200.0, 5.0, 30.0, 30.0],
             name='observation'
         )
 
@@ -182,7 +182,6 @@ class JVMEnv(py_environment.PyEnvironment):
             # Ignore the current action and start a new episode.
             logging.debug(f"[EPISODE ENDED] {self._get_info()}, target: {self._state[self._goal_idx]}")
             return self.reset()
-              
         # Apply an action based on the mapping: decrease/increase <flag.value>.
         self._action_mapping.get(int(action))()
 
@@ -191,7 +190,7 @@ class JVMEnv(py_environment.PyEnvironment):
         
         # Check if the current JVM configuration is cached.
         # Add `state` to cache if new.
-        self._state = self._state_merging(self._state[:self._num_variables])
+        self._state = copy.deepcopy(self._state_merging(self._state[:self._num_variables]))
         
         # Termination criteria
         if self._state[self._goal_idx] <= self._default_state[self._goal_idx] * 0.04:
@@ -202,6 +201,8 @@ class JVMEnv(py_environment.PyEnvironment):
             previous_state=self._default_state,
             lower_is_better=True,
             beta=0.0)  # ! No intrinsic reward
+        
+        logging.debug(f"[STEP] {self._get_info()}, target: {self._state[self._goal_idx]}")
         
         if self._episode_ended:
             return ts.termination(
@@ -438,8 +439,8 @@ class JVMEnv(py_environment.PyEnvironment):
         if lower_is_better:
             coef = -1
             
-        current_goal = current_state[1]
-        previous_goal = previous_state[1]
+        current_goal = current_state[self._goal_idx]
+        previous_goal = previous_state[self._goal_idx]
         
         if coef * current_goal <= previous_goal:
             for i in self._perf_states.keys():
