@@ -4,3 +4,5 @@ tmp/*
 dacapo/*
 __pycache__/*
 scratch/*
+summaries_*/*
+*logs

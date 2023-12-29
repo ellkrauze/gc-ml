@@ -31,7 +31,6 @@ wget -O jdk.tar.gz https://download.bell-sw.com/java/11.0.20+8/bellsoft-jdk11.0.
 Unpack `jdk.tar.gz` and remove the archive.
 ```
 tar xzf jdk.tar.gz && rm -fv jdk.tar.gz
-cd jdk-11.0.20.8 & java -version
 ```
 
 ## 2. Prepare a dataset
