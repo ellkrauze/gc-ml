@@ -1,4 +1,5 @@
 import os
+import glob
 import pandas as pd
 import numpy as np
 import seaborn as sns
@@ -25,17 +26,21 @@ def get_data_from_csv(csv_dir: str, goals):
     flag_2_values = []
     goal_values = []
 
-    for summary in os.listdir(csv_dir):
+    for summary in glob.glob(csv_dir):
         basename = os.path.splitext(summary)[0]
         p, m = basename.split('_')[-2], basename.split('_')[-1]
-        summary_abs_path = os.path.join(csv_dir, summary)
+        summary_abs_path = os.path.abspath(summary)
 
         summary_df = (pd
                       .read_csv(
                           summary_abs_path, sep=sep, skiprows=1, header=None)
                       .replace(',', '', regex=True)
                       .replace('n.a.', 'NaN', regex=True))
-        params = summary_df[summary_df[0].isin(goals)][1].astype(float).values
+        # params = summary_df[summary_df[0].isin(goals)][1].astype(float).values
+        params = []
+        for goal in goals:
+            param = summary_df[summary_df[0] == goal][1].astype(float).values[0]
+            params.append(param)
         assert len(goals) == len(params), "Check if goal name is in summary"
         
         flag_1_values.append(int(p))

@@ -47,7 +47,7 @@ def plot_goal_heatmap(env, flags=None, goal: str="Average GC Pause"):
         flags[1]: Y, 
         goal: Z})
     data_pivoted = data.pivot(index=flags[0], columns=flags[1], values=goal)
-    ax = sns.heatmap(data_pivoted, annot=True, ax=ax, fmt=".2f")
+    ax = sns.heatmap(data_pivoted, annot=True, ax=ax, fmt=".3f")
     ax.invert_yaxis()
     plt.show()
 
@@ -65,6 +65,6 @@ def plot_heatmap(x, y, z, flags=None, goal: str="Average GC Pause"):
         goal: z})
     
     data_pivoted = data.pivot(index=flags[0], columns=flags[1], values=goal)
-    ax = sns.heatmap(data_pivoted, annot=True, ax=ax, fmt=".2f")
+    ax = sns.heatmap(data_pivoted, annot=True, ax=ax, fmt=".3f")
     ax.invert_yaxis()
     plt.show()

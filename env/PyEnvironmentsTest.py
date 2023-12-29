@@ -1,14 +1,14 @@
 import os
 import re
 import copy
+import random
 import subprocess
 import logging
+
 import numpy as np
 import pandas as pd
-from constraint import *
 from typing import Any, Dict, List
 from tf_agents.typing import types
-from tf_agents.trajectories import TimeStep
 from tf_agents.specs import array_spec
 from tf_agents.environments import py_environment
 from tf_agents.trajectories import time_step as ts
@@ -48,8 +48,8 @@ class JVMEnv(py_environment.PyEnvironment):
         self._num_variables = 2
         self._goal_idx = self._num_variables
         self._flags = {
-            "MaxTenuringThreshold": {"min": 1, "max": 16},
-            "ParallelGCThreads": {"min": 4, "max": 24},
+            "MaxTenuringThreshold": {"min": 1, "max": 16, "step": 3},
+            "ParallelGCThreads": {"min": 4, "max": 24, "step": 4},
         }
 
         self._action_mapping = {
@@ -64,6 +64,7 @@ class JVMEnv(py_environment.PyEnvironment):
 
         self._flags_min_values = [self._flags[i]["min"] for i in self._flags.keys()]
         self._flags_max_values = [self._flags[i]["max"] for i in self._flags.keys()]
+        self._flags_step_values = [self._flags[i]["step"] for i in self._flags.keys()]
 
         self._action_spec = array_spec.BoundedArraySpec(
             shape=(),
@@ -76,18 +77,15 @@ class JVMEnv(py_environment.PyEnvironment):
         self._observation_spec = array_spec.BoundedArraySpec(
             shape=(self._num_variables + 1 + 7,),  # 1 goal, {X} external vars
             dtype=np.float32,
-            # minimum=self._flags_min_values,
-            # maximum=self._flags_max_values,
-            # minimum=[1, 4, 0.0, 0.0, 0.0, 0.0, 0.0],
-            # maximum=[16, 24, 3.0, 200.0, 5.0, 30.0, 30.0],
             name='observation'
         )
 
         # For offline RL: if you already have a dataset file with trajectories.
         self._new_df = pd.read_csv(
-            f"datasets/ext_{self._bm}_real_saved_states.csv")
+            f"datasets/norm_ext_{self._bm}_real_saved_states.csv")
         
-        self._default_state = self._get_default_state(mode="default")
+        # self._default_state = self._get_default_state(mode="default")
+        self._default_state = self._get_default_state(mode="random")
 
         self._perf_states = {}
         self._perf_states[0] = {
@@ -158,6 +156,7 @@ class JVMEnv(py_environment.PyEnvironment):
         self._episode_ended = False
         
         # To ensure all elements within an object array are copied, use `copy.deepcopy`
+        self._default_state = self._get_default_state(mode="random")
         self._state = copy.deepcopy(self._default_state)
 
         logging.debug(f"[RESET] {self._get_info()}, target: {self._state[self._goal_idx]}")
@@ -325,15 +324,22 @@ class JVMEnv(py_environment.PyEnvironment):
         (np.array) The initial state of the Agent which stores the default
         JVM_OPTS and its performance measurement.
         """
+        assert mode in ["default", "random"], f"Unknown mode: {mode}"
         
-        state = self._synthetic_run([7, 12])
-        # if self._bm == "avrora":
-        #     return np.array([[7, 12], 0.47], dtype=object)
-        # elif self._bm == "kafka":
-        #     return np.array([[7, 12], 0.34], dtype=object)
-        # elif self._bm == "test":
-        #     return np.array([[7, 12], 0.57], dtype=object)
-        return state  # array([])
+        if mode == "default":
+            state = self._synthetic_run([7, 12])
+        if mode == "random":
+            rand_flags = []
+            for i in range(self._num_variables):
+                rand_flags.append(
+                    random.randrange(
+                        start=self._flags_min_values[i],
+                        stop=self._flags_max_values[i],
+                        step=self._flags_step_values[i]
+                    )
+                )
+            state = self._synthetic_run(rand_flags)
+        return state
     
     def _get_goal_value(self, jvm_opts: List[str] = []):
         """
