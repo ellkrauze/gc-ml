@@ -1,17 +1,17 @@
-import os
-import re
 import copy
-import random
-import subprocess
 import logging
+import os
+import random
+import re
+import subprocess
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
-from typing import Any, Dict, List
-from tf_agents.typing import types
-from tf_agents.specs import array_spec
 from tf_agents.environments import py_environment
+from tf_agents.specs import array_spec
 from tf_agents.trajectories import time_step as ts
+from tf_agents.typing import types
 
 
 class JVMEnv(py_environment.PyEnvironment):
@@ -157,6 +157,7 @@ class JVMEnv(py_environment.PyEnvironment):
         
         # To ensure all elements within an object array are copied, use `copy.deepcopy`
         self._default_state = self._get_default_state(mode="random")
+        # self._default_state = self._get_default_state(mode="default")
         self._state = copy.deepcopy(self._default_state)
 
         logging.debug(f"[RESET] {self._get_info()}, target: {self._state[self._goal_idx]}")
@@ -331,11 +332,14 @@ class JVMEnv(py_environment.PyEnvironment):
         if mode == "random":
             rand_flags = []
             for i in range(self._num_variables):
+                min_val = self._flags_min_values[i]
+                max_val = self._flags_max_values[i]
+                step_val = self._flags_step_values[i]
                 rand_flags.append(
                     random.randrange(
-                        start=self._flags_min_values[i],
-                        stop=self._flags_max_values[i],
-                        step=self._flags_step_values[i]
+                        start=min_val,
+                        stop=max_val + step_val,  # must be included
+                        step=step_val,
                     )
                 )
             state = self._synthetic_run(rand_flags)
