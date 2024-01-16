@@ -1,0 +1,35 @@
+{
+    "jdk_path": "jdk-11.0.20.1.jdk",
+    "bm_path": "dacapo-bench.jar",
+    "gc_viewer_jar": "gcviewer-1.36.jar",
+    "callback_path": "callback/VMStatCallback.java",
+    "n": 5,
+    "goal": "avgGCPause",
+    "verbose": false,
+    "train_benchmarks": [
+        "ext_kafka_2",
+        "ext_kafka_4",
+        "ext_kafka_8",
+        "ext_kafka_16",
+        "ext_kafka_32",
+        "ext_avrora_2",
+        "ext_avrora_4",
+        "ext_avrora_8",
+        "ext_avrora_16",
+        "ext_avrora_32"
+    ],
+    "test_benchmark": "ext_avrora_32",
+
+    "dataset_size": 10000,
+    "fc_layer_params": [200, 150, 100, 75, 50],
+    "learning_rate": 1e-6,
+    "eval_interval": 100,
+    "train_episodes_per_iteration": 5,
+    "entropy_regularization": 0.01,
+    "importance_ratio_clipping": 0.2,
+    "policy_l2_reg": 4e-4,
+    "batch_size": 32,
+
+    "num_steps": 7000,
+    "policy_dir": "avrora32_policy"
+}
