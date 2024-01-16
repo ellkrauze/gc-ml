@@ -1,8 +1,9 @@
-gc-ml-env/*
-jdk-*/*
-tmp/*
-dacapo/*
-__pycache__/*
-scratch/*
-summaries_*/*
-*logs
+gc-ml-env
+jdk-*
+tmp
+dacapo
+__pycache__
+scratch
+summaries_*
+*log
+wandb
