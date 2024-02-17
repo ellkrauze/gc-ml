@@ -1,0 +1,75 @@
+{
+    "jdk_path": "jdk-11.0.20.1.jdk",
+    "bm_path": "dacapo-bench.jar",
+    "gc_viewer_jar": "gcviewer-1.36.jar",
+    "callback_path": "callback/VMStatCallback.java",
+    "n": 5,
+    "verbose": false,
+    "default_flags": ["-XX:+UseParallelGC"],
+    "goals": 
+        [
+            {
+                "name": "footprint",
+                "minimize": true
+            }
+        ],
+
+    "flags":
+        [
+            {
+                "name": "MaxTenuringThreshold",
+                "min": 1, 
+                "max": 16,
+                "step": 3
+            },
+            {
+                "name": "ParallelGCThreads",
+                "min": 4, 
+                "max": 24,
+                "step": 4,
+                "unit": ""
+            },
+            {
+                "name": "MaxHeapSize",
+                "min": 2, 
+                "max": 24,
+                "step": 4,
+                "unit": "G"
+            },
+            {
+                "name": "InitialHeapSize",
+                "min": 4, 
+                "max": 24,
+                "step": 4,
+                "unit": "G"
+            },
+            {
+                "name": "NewSize",
+                "min": 128, 
+                "max": 512,
+                "step": 64,
+                "unit": "M"
+            },
+            {
+                "name": "SurvivorRatio",
+                "min": 8, 
+                "max": 16,
+                "step": 1,
+                "unit": ""
+            },
+            {
+                "name": "TargetSurvivorRatio",
+                "min": 50, 
+                "max": 90,
+                "step": 1,
+                "unit": ""
+            }
+        ],
+
+    "params": [
+        "fullGCPause", "avgPause", 
+        "fullGcPauseCount", "footprint", 
+        "gcPerformance", "totalTenuredUsedMax", 
+        "avgPromotion", "fullGCPerformance"
+    ]
+}
