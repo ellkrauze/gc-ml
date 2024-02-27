@@ -4,7 +4,8 @@ import os
 import random
 import re
 import subprocess
-from typing import Any, Dict, List
+import warnings
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
@@ -14,7 +15,36 @@ from tf_agents.trajectories import time_step as ts
 from tf_agents.typing import types
 
 
+class JVMState:
+    def __init__(self, flags=[], params=[], goals=[]):
+        self._flags = flags
+        self._params = params
+        self._goals = goals
+
+    def get_list(self):
+        return np.array([*self._flags, *self._params, *self._goals])
+
+    def get_flags(self):
+        return self._flags
+
+    def get_params(self):
+        return self._params
+
+    def get_goals(self):
+        return self._goals
+
+    def set_flags(self, flags):
+        self._flags = flags
+
+    def set_params(self, params):
+        self._params = params
+
+    def set_goals(self, goals):
+        self._goals = goals
+
+
 class JVMEnv(py_environment.PyEnvironment):
+    """A PyEnvironment for Java Virtual Machine optimization."""
 
     def __init__(
         self,
@@ -25,85 +55,148 @@ class JVMEnv(py_environment.PyEnvironment):
         goals: List,
         flags: List,
         params: List,
+        default_flags: List,
         bm_name: str = "avrora",
         n: int = 5,
         verbose: bool = False,
+        beta: float = 0.0,
+        run_offline: bool = True,
     ):
+        """Create a JVM Python Envrionment by passing an OpenJDK,
+        DaCapo benchmark executive jar, DaCapo benchmark name,
+        GCViewer jar to parse Garbage Collector logging files,
+        and other options to run a benchmark, measure the performance,
+        and the JVM flags to configure the next run.
 
+        Args:
+            jdk_path (str): An OpenJDK directory.
+            bm_path (str): A path to DaCapo benchmark jar.
+            gc_viewer_jar (str): A path to GCViewer jar.
+            callback_path (str): A path to DaCapo callback file.
+            goals (List): A list of user performance metrics in such format:
+            ```
+            [
+                {
+                    "name": "footprint",
+                    "minimize": true
+                }
+            ]
+            ```
+            flags (List): A list of JVM flags to consider when tuning:
+            ```
+            [
+                {
+                    "name": "MaxTenuringThreshold",
+                    "min": 1,
+                    "max": 16,
+                    "step": 3
+                },
+                {
+                    "name": "ParallelGCThreads",
+                    "min": 4,
+                    "max": 24,
+                    "step": 4,
+                    "unit": ""
+                },
+                {
+                    "name": "MaxHeapSize",
+                    "min": 2,
+                    "max": 24,
+                    "step": 4,
+                    "unit": "G"
+                }
+            ],
+            ```
+            params (List): A list of external parameters to consider when tuning.
+                These are extracted from GCViewer summary file.
+            ```
+            [
+                "fullGCPause",
+                "avgPause",
+                "fullGcPauseCount",
+                "footprint",
+                "gcPerformance",
+                "totalTenuredUsedMax",
+                "avgPromotion",
+                "fullGCPerformance"
+            ]
+            ```
+            default_flags (List): JVM flags that will be used in every run of a benchmark.
+            ```
+            ["-XX:+UseParallelGC"]
+            ```
+            bm_name (str, optional): DaCapo benchmark name. Defaults to "avrora".
+            n (int, optional): Number of iterations to run a benchmark. Defaults to 5.
+            verbose (bool, optional): Print debug messages. Defaults to False.
+            beta (float, optional): Importance of intrinsic rewards ([0.0, 1.0]). Defaults to 0.0.
+        """
         self.jdk = jdk_path
         self.bm_path = bm_path
         self.gc_viewer_jar = gc_viewer_jar
-        self._callback_path = callback_path
-        self._bm = bm_name
-        self._gc_log_file = f"gc-{self._bm}.txt"
+        self.callback_path = callback_path
+        self.bm_name = bm_name
+        self._gc_log_file = f"gc-{self.bm_name}.txt"
         self._n = n
         self._goals = goals
         self._flags = flags
         self._params = params
+        self._default_flags = default_flags
         self._verbose = verbose
+        self._beta = beta
+        self._run_offline = run_offline
 
         self._env = os.environ.copy()
         self._env["PATH"] = f"{self.jdk}:{self._env['PATH']}"
+
         self._episode_ended = False
 
         # ============= F L A G S =============
-        self._num_flags = len(flags)
-        self._num_goals = len(goals)
-        self._num_params = len(params)
-        # TODO: Find min and max values for flags
-        # self._goal_idx = self._num_flags
-        # self._flags = {
-        #     "MaxTenuringThreshold": {"min": 1, "max": 16, "step": 3},
-        #     "ParallelGCThreads": {"min": 4, "max": 24, "step": 4},
-        # }
+        self._num_flags = len(self._flags)
+        self._num_params = len(self._params)
+        self._num_goals = len(self._goals)
 
-        self._action_mapping = {
-            0: self._decrease_MaxTenuringThreshold,
-            1: self._increase_MaxTenuringThreshold,
-            2: self._decrease_ParallelGCThreads,
-            3: self._increase_ParallelGCThreads,
-        }
-        # =====================================
+        # TODO: #9 Add support of boolean JVM flags
+        self._flags_min_values = [each["min"] for each in self._flags]
+        self._flags_max_values = [each["max"] for each in self._flags]
+        self._flags_step_values = [each["step"] for each in self._flags]
+        self._goals_optimization_target = [each["minimize"] for each in self._goals]
 
-        assert (
-            len(self._action_mapping) == 2 * self._num_flags
-        ), "Each flag should have 2 actions!"
-
-        # self._flags_min_values = [self._flags[i]["min"] for i in self._flags.keys()]
-        # self._flags_max_values = [self._flags[i]["max"] for i in self._flags.keys()]
-        # self._flags_step_values = [self._flags[i]["step"] for i in self._flags.keys()]
-        
-        self._flags_min_values = [flag["min"] for flag in self._flags]
-        self._flags_max_values = [flag["max"] for flag in self._flags]
-        self._flags_step_values = [flag["step"] for flag in self._flags]
+        self._flags_names = [each["name"] for each in self._flags]
+        self._goals_names = [each["name"] for each in self._goals]
+        self._params_names = self._params
 
         self._action_spec = array_spec.BoundedArraySpec(
-            shape=(),
+            shape=(self._num_flags,),
             dtype=np.int32,
-            minimum=0,
-            maximum=2 * self._num_flags - 1,  # {0, 1, 2, 3}
+            minimum=np.array(self._flags_min_values),
+            maximum=np.array(self._flags_max_values),
             name="action",
         )
 
         self._observation_spec = array_spec.BoundedArraySpec(
-            shape=(self._num_flags + self._num_goals + self._num_params,),  # 1 goal, {X} external vars
+            shape=(self._num_flags + self._num_goals + self._num_params,),
             dtype=np.float32,
             name="observation",
         )
 
-        # For offline RL: if you already have a dataset file with trajectories.
-        self._new_df = pd.read_csv(f"datasets/{self._bm}_real_saved_states.csv")
+        self._default_state = self._get_default_state(mode="default")
+        # self._default_state = self._get_default_state(mode="random")
 
-        # self._default_state = self._get_default_state(mode="default")
-        self._default_state = self._get_default_state(mode="random")
-
-        self._perf_states = {}
-        self._perf_states[0] = {
-            "args": self._default_state[: self._num_flags],
-            "goal": self._default_state[self._goal_idx],
-            "extra": self._default_state[self._goal_idx + 1 :],
-            "count": 1,
-        }
+        if run_offline:
+            # For offline RL: if you already have a dataset file with saved states.
+            self._cache_filename = (
+                f"datasets/large_{self.bm_name}_real_saved_states.csv"
+            )
+            self._cached_states_df = pd.read_csv(self._cache_filename)
+            self._perf_states = self._load_states_from_cache()
+        else:
+            self._perf_states = {}
+            self._perf_states[0] = {
+                "flags": self._default_state.get_flags(),
+                "goals": self._default_state.get_goals(),
+                "params": self._default_state.get_params(),
+                "count": 1,
+            }
 
         self._print_welcome_msg()
 
@@ -128,6 +221,17 @@ class JVMEnv(py_environment.PyEnvironment):
         self._bm_path = os.path.join(path)
 
     @property
+    def bm_name(self):
+        return self._bm_name
+
+    @bm_name.setter
+    def bm_name(self, name: str):
+        if name in ["avrora", "kafka", "h2"]:
+            self._bm_name = name
+        else:
+            raise Exception(f"No such DaCapo benchmark: {name}")
+
+    @property
     def gc_viewer_jar(self):
         return self._gc_viewer_jar
 
@@ -137,6 +241,16 @@ class JVMEnv(py_environment.PyEnvironment):
             raise FileNotFoundError(path)
         self._gc_viewer_jar = os.path.join(path)
 
+    @property
+    def callback_path(self):
+        return self._callback_path
+
+    @callback_path.setter
+    def callback_path(self, path: str):
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+        self._callback_path = os.path.join(path)
+
     def action_spec(self):
         """Get the actions that should be provided to `step()`."""
         return self._action_spec
@@ -144,10 +258,6 @@ class JVMEnv(py_environment.PyEnvironment):
     def observation_spec(self):
         """Get the the observations provided by the environment."""
         return self._observation_spec
-
-    @property
-    def performance_states(self) -> Dict[int, Any]:
-        return self._perf_states
 
     def _reset(self):
         """
@@ -166,16 +276,11 @@ class JVMEnv(py_environment.PyEnvironment):
         """
         self._episode_ended = False
 
-        # To ensure all elements within an object array are copied, use `copy.deepcopy`
-        self._default_state = self._get_default_state(mode="random")
-        # self._default_state = self._get_default_state(mode="default")
-        
         self._state = copy.deepcopy(self._default_state)
 
-        logging.debug(
-            f"[RESET] {self._get_info()}, target: {self._state[self._goal_idx]}"
-        )
-        return ts.restart(np.array(self._state, dtype=np.float32))
+        self._print_info("reset")
+
+        return ts.restart(np.array(self._state.get_list(), dtype=np.float32))
 
     def _step(self, action: types.NestedArray):
         """Updates the environment according to action.
@@ -194,45 +299,52 @@ class JVMEnv(py_environment.PyEnvironment):
         if self._episode_ended:
             # The last action ended the episode.
             # Ignore the current action and start a new episode.
-            logging.debug(
-                f"[EPISODE ENDED] {self._get_info()}, target: {self._state[self._goal_idx]}"
-            )
+            self._print_info("episode ended")
             return self.reset()
-        # Apply an action based on the mapping: decrease/increase <flag.value>.
-        self._action_mapping.get(int(action))()
 
-        # Make sure we don't leave the boundaries.
-        self._state = self._clip_state(self._state)
+        self._state.set_flags(action.action)
 
         # Check if the current JVM configuration is cached.
-        # Add `state` to cache if new.
-        self._state = copy.deepcopy(
-            self._state_merging(self._state[: self._num_flags])
-        )
-
-        # Termination criteria
-        if self._state[self._goal_idx] <= self._default_state[self._goal_idx] * 0.04:
-            self._episode_ended = True
+        # If new, run benchmark, measure performance,
+        # and add this state to cache.
+        self._state = self._state_merging(self._state.get_flags())
 
         self._reward = self._get_reward(
             current_state=self._state,
             previous_state=self._default_state,
-            lower_is_better=True,
-            beta=0.0,
-        )  # ! No intrinsic reward
-
-        logging.debug(
-            f"[STEP] {self._get_info()}, target: {self._state[self._goal_idx]}"
+            lower_is_better=self._goals_optimization_target,
+            beta=self._beta,
         )
 
-        if self._episode_ended:
-            return ts.termination(np.array(self._state, dtype=np.float32), reward=2.0)
-        else:
-            return ts.transition(
-                np.array(self._state, dtype=np.float32),
-                reward=self._reward,
-                discount=0.5,
+        self._print_info("step")
+
+        return ts.transition(
+            np.array(self._state.get_list(), dtype=np.float32),
+            reward=self._reward,
+            discount=0.5,
+        )
+
+    def save(self, filename: str):
+        """Save performance states to CSV file.
+
+        Args:
+            filename (str): Destination file path.
+        """
+        if len(self._perf_states):
+            columns = [*self._flags_names, *self._params_names, *self._goals_names]
+            states = np.array(
+                [
+                    [*state["flags"], *state["params"], *state["goals"]]
+                    for state in self._perf_states.values()
+                ]
             )
+            logging.info("Saving environment states to file %s".format(filename))
+            cache_df = pd.DataFrame(states, columns=columns)
+            # Append to file if exists.
+            use_header = not os.path.exists(filename)
+            cache_df.to_csv(filename, index=False, mode="a", header=use_header)
+        else:
+            warnings.warn("Cache is empty. Nothing to backup...")
 
     def _state_merging(self, flags):
         """
@@ -244,24 +356,27 @@ class JVMEnv(py_environment.PyEnvironment):
         Han, Xue & Yu, Tingting. (2020).
         Automated Performance Tuning for Highly-Configurable Software Systems.
 
-        0: {"args": [10, 10], "goal": 234, "extra": [150, 0.1, 30, 19], "count": 1},
-        1: {"args": [10, 20], "goal": 222, "extra": [140, 0.2, 29, 18], "count": 4},
+        0: {"flags": [10, 10], "goal": [234], "params": [150, 0.1, 30, 19], "count": 1},
+        1: {"flags": [10, 20], "goal": [222], "params": [140, 0.2, 29, 18], "count": 4},
         ...
         """
-        saved_states = [self._perf_states[i]["args"] for i in self._perf_states.keys()]
-        state = []
-        if flags == self._default_state[: self._num_flags]:
-            state = self._default_state
-        elif flags in saved_states:
+        saved_states = [self._perf_states[i]["flags"] for i in self._perf_states.keys()]
+        state = JVMState()
+        if np.array_equal(flags, self._default_state.get_flags()):
+            state = copy.deepcopy(self._default_state)
+        elif np.any(np.all(flags == saved_states, axis=1)):
             """
             If current state is stored in a cache,
             update the state goal value.
             """
-            idx = saved_states.index(flags)
+            # idx = saved_states.index(flags)
+            idx = np.where((saved_states == flags).all(axis=1))[0][0]
             self._perf_states[idx]["count"] += 1
-            goal = self._perf_states[idx]["goal"]
-            extra = self._perf_states[idx]["extra"]
-            state = [*flags, goal, *extra]
+
+            goal = self._perf_states[idx]["goals"]
+            params = self._perf_states[idx]["params"]
+
+            state = JVMState(flags, params, goal)
         else:
             """
             If current state is not stored in the cache,
@@ -273,34 +388,55 @@ class JVMEnv(py_environment.PyEnvironment):
             except IndexError:
                 # If `self._perf_states` is empty
                 last_index = -1
+
             # Launch a benchmark with a new JVM configuration
-            state = self._synthetic_run(flags)
+            # state = self._synthetic_run(flags)
+            state = self._run(flags)
+
             # Store a new state in the cache, count = 1.
             self._perf_states[last_index + 1] = {
-                "args": list(flags),
-                "goal": state[self._goal_idx],
-                "extra": state[self._goal_idx + 1 :],
+                "flags": state.get_flags(),
+                "goals": state.get_goals(),
+                "params": state.get_params(),
                 "count": 1,
             }
-        assert len(state) != 0
+
+        assert len(state.get_list()) != 0, "State is empty!"
+
         return state
 
-    def _synthetic_run(self, flag_values: List[int]):
-        flag_names = list(self._new_df.columns[: self._num_flags])
-        param_names = list(self._new_df.columns[self._num_flags :])
-        # Select columns where flags equal to flag_values
-        param_values = (
-            self._new_df.set_index(flag_names)
-            .loc[tuple(flag_values), param_names]
-            .values
+    def _synthetic_run(self, flags_values: List[int]):
+        try:
+            # Select columns where flags equal to flag_values
+            params_values = (
+                self._cached_states_df.set_index(self._flags_names)
+                .loc[tuple(flags_values), self._params_names]
+                .values
+            )
+
+            goals_values = (
+                self._cached_states_df.set_index(self._flags_names)
+                .loc[tuple(flags_values), self._goals_names]
+                .values
+            )
+        except KeyError:
+            warnings.warn("No configuration found in cache. Generating random numbers")
+            params_values = np.random.random((self._num_params,))
+            goals_values = np.random.random((self._num_goals,))
+
+        state = JVMState(
+            flags=flags_values,
+            params=params_values,
+            goals=goals_values,
         )
-        state = [*flag_values, *param_values]
         return state
 
-    def _get_JVM_opt_value(self, opt: str):
+    def _get_default_jvm_option_value(self, opt: str):
         """
-        Get the defaul JVM option value from environment
+        Get the default JVM option value from environment
         by parsing java PrintFlagsFinal output.
+        Equals to bash command:
+        java -XX:+PrintFlagsFinal -version|grep "$opt"|
 
         Parameters:
         opt (str): JVM option name
@@ -319,17 +455,45 @@ class JVMEnv(py_environment.PyEnvironment):
         for line in flags.split("\n"):
             if re.search(opt, line):
                 opt_value = re.findall("\d+", line)[0]
-                # TODO: Handle boolean values
+                # TODO: #9 Add support of boolean JVM flags
                 return int(opt_value)
 
-    def _get_info(self):
+    def _load_states_from_cache(self) -> Dict:
+        """Create a dictionary of performance states,
+        load saved variables from a cache dataframe.
+
+        Returns:
+            Dict: Loaded from cache dataframe performance states.
+        """
+        flags = self._cached_states_df[self._flags_names].values
+        params = self._cached_states_df[self._params_names].values
+        goals = self._cached_states_df[self._goals_names].values
+
+        try:
+            perf_states = {}
+            num_states = self._cached_states_df.shape[0]
+            for i in range(num_states):
+                perf_states[i] = {
+                    "flags": flags[i],
+                    "params": params[i],
+                    "goals": goals[i],
+                    "count": 1,
+                }
+        except IndexError:
+            logging.error(
+                "Could not load perf states from a cache pd.DataFrame! \
+                    Perhaps there is no states in the dataframe."
+            )
+        return perf_states
+
+    def _print_info(self, stage: str):
         info = {}
-        flags = list(self._flags.keys())
-        for flag in flags:
-            flag_idx = flags.index(flag)
-            flag_value = self._state[flag_idx]
-            info[flag] = flag_value
-        return info
+        for i, flag_info in enumerate(self._flags):
+            flag_name = flag_info["name"]
+            flag_value = self._state.get_flags()[i]
+            info[flag_name] = flag_value
+        logging.debug("[{stage}] {info}, target: {self._state.get_goals()}")
+        # return info
 
     def _get_default_state(self, mode: str = "default"):
         """
@@ -339,10 +503,9 @@ class JVMEnv(py_environment.PyEnvironment):
         goal value.
 
         Parameters:
-        mode (str): The mode of generating JVM options (default/minimum/random)
+        mode (str): The mode of generating JVM options (default/random)
                     where
                     - "default" sets JVM_OPTS default JDK options,
-                    - "minimum" sets JVM_OPTS minimum possible values,
                     - "random" sets JVM_OPTS random values within options
                     range.
 
@@ -352,70 +515,85 @@ class JVMEnv(py_environment.PyEnvironment):
         """
         assert mode in ["default", "random"], f"Unknown mode: {mode}"
 
+        flag_values = []
+
         if mode == "default":
-            state = self._synthetic_run([7, 12])
+            flag_values = [7, 12, 4]
+            assert len(flag_values) == self._num_flags, "Fix default flag values"
         if mode == "random":
-            rand_flags = []
             for i in range(self._num_flags):
+
                 min_val = self._flags_min_values[i]
                 max_val = self._flags_max_values[i]
                 step_val = self._flags_step_values[i]
-                rand_flags.append(
+
+                flag_values.append(
                     random.randrange(
                         start=min_val,
                         stop=max_val + step_val,  # must be included
                         step=step_val,
                     )
                 )
-            state = self._synthetic_run(rand_flags)
+
+        # TODO: Replace this to self._run_benchmark
+        # state = self._synthetic_run(flag_values)
+        state = self._run(flag_values)
         return state
 
-    def _get_goal_value(self, jvm_opts: List[str] = []):
+    def _run(self, flag_values: List):
         """
         Run the benchmark with default values and
         get a start point of the goal.
 
         Parameters:
-        jvm_opts (list): An array of JVM options.
+        flag_values (list): An array of JVM options values.
 
         Returns:
         (int) A performance measurement (target metric
         or goal value).
         """
-        # Run benchmark with default values
-        self._run(
+        # Convert to List of str
+        jvm_opts = self._get_jvm_options(flag_values)
+
+        self._run_benchmark(
             jvm_opts,
             self._gc_log_file,
-            self._bm,
+            self.bm_name,
             self.bm_path,
-            self._callback_path,
+            self.callback_path,
             self._n,
         )
 
         if os.path.exists(self._gc_log_file):
             # Get goal value from first-time generated GC log
-            result = self._get_goal_from_file()
+            param_values, goal_values = self._get_metrics_from_file(
+                self._params_names, self._goals_names
+            )
             # Clean up
             os.remove(self._gc_log_file)
-            return result
+
+            state = JVMState(flag_values, param_values, goal_values)
+
+            return state
         else:
             raise Exception(
                 "GC log file was not generated: please, ensure that benchmark runs correctly!"
             )
 
-    def _clip_state(self, state):
-        for i in range(self._num_flags):
-            """
-            Iterate through each flag value in `state`
-            and use `np.clip` to make sure we don't leave
-            the boundaries
-            """
-            min_value_i = self._flags_min_values[i]
-            max_value_i = self._flags_max_values[i]
-            state[i] = np.clip(state[i], min_value_i, max_value_i)
+    def _clip_state(self, state: JVMState):
+        """
+        Use `np.clip` to make sure each JVM flag
+        does not leave the boundaries.
+        """
+        flags = np.clip(
+            state.get_flags(), self._flags_min_values, self._flags_max_values
+        )
+
+        state.set_flags(flags)
+
         return state
 
-    def _get_goal_from_file(self):
+    def _get_metrics_from_file(self, params, goals):
         sep = ";"
         summary = "summary.csv"
         goal_value = None
@@ -439,23 +617,32 @@ class JVMEnv(py_environment.PyEnvironment):
         assert os.path.exists(summary), f"File {summary} does not exist"
 
         with open(summary, "+r") as summary_file:
-            for line in summary_file.readlines():
-                if self._goal + sep in line:
-                    goal_value = float(line.split(sep)[1])
+            summary_df = pd.read_csv(
+                summary_file, sep=sep, skiprows=1, header=None
+            ).replace(",", "", regex=True)
+            summary_df.iloc[:, 1] = summary_df.iloc[:, 1].replace(
+                "n.a.", "NaN", regex=True
+            )
+            param_values = (
+                summary_df.set_index(0).loc[params].iloc[:, 0].values.astype(np.float32)
+            )
+            goal_values = (
+                summary_df.set_index(0).loc[goals].iloc[:, 0].values.astype(np.float32)
+            )
 
-        if goal_value == None:
-            raise Exception(f"Goal '{self._goal}' was not found in '{summary}'!")
+        assert len(param_values) != 0, "Params not found"
+        assert len(goal_values) != 0, "Goals not found"
 
-        if os.path.exists(summary):
-            os.remove(summary)
+        # if os.path.exists(summary):
+        #     os.remove(summary)
 
-        return goal_value
+        return param_values, goal_values
 
     def _get_reward(
         self,
-        current_state: np.array,
-        previous_state: np.array,
-        lower_is_better: bool = False,
+        current_state: JVMState,
+        previous_state: JVMState,
+        lower_is_better: List[bool],
         beta: float = 1.0,
     ):
         """
@@ -478,22 +665,25 @@ class JVMEnv(py_environment.PyEnvironment):
             reward (float):             An environment reward value at current
                                         time step.
         """
-        coef = 1
+        # TODO: Check if beta is in range [0, 1]
+
         reward_in = 0  # Intrinsic reward.
         reward_ex = 0  # Extrinsic reward.
 
-        # TODO: Check if beta is in range [0, 1]
-
-        if lower_is_better:
-            coef = -1
-
-        current_goal = current_state[self._goal_idx]
-        previous_goal = previous_state[self._goal_idx]
+        # JVMState supports multiple goal values,
+        # so we select the first parameter from list
+        # TODO: #8 Add multi-objective support
+        assert len(current_state.get_goals()) == 1, "Multi-objective is not supported"
+        current_goal = current_state.get_goals()[0]
+        previous_goal = previous_state.get_goals()[0]
+        coef = -1 if lower_is_better[0] else 1
 
         if coef * current_goal <= previous_goal:
             for i in self._perf_states.keys():
-                if self._perf_states[i]["args"] == current_state[: self._num_flags]:
-                    # First, we add the state to cache with count=1,
+                if np.array_equal(
+                    self._perf_states[i]["flags"], current_state.get_flags()
+                ):
+                    # First, we add the state to a cache with count=1,
                     # but we haven't run the benchmark with it yet,
                     # so it is fair to say that actually count is 0.
                     count = self._perf_states[i]["count"] - 1
@@ -506,66 +696,27 @@ class JVMEnv(py_environment.PyEnvironment):
 
         return reward
 
-    def _decrease_MaxTenuringThreshold(self):
-        idx = 0
-        coef = 3
-        saved_values = [
-            self._perf_states[i]["args"][idx] for i in self._perf_states.keys()
-        ]
-        self._state[idx] = min(
-            saved_values, key=lambda x: abs(x - (self._state[idx] - coef))
-        )
-        self._state[idx] -= coef
+    def _get_jvm_options(self, run_flags: List):
+        """Return a list of JVM options in the format:
+        [-XX:<flag_name>=<flag_value><flag_unit>]
 
-    def _increase_MaxTenuringThreshold(self):
-        idx = 0
-        coef = 3
-        saved_values = [
-            self._perf_states[i]["args"][idx] for i in self._perf_states.keys()
-        ]
-        self._state[idx] = min(
-            saved_values, key=lambda x: abs(x - (self._state[idx] + coef))
-        )
-        self._state[idx] += coef
+        Returns:
+            List: JVM options with values.
+        """
+        jvm_options = []
+        for i, flag_info in enumerate(self._flags):
+            flag_name = flag_info["name"]
+            flag_value = run_flags[i]
+            flag_unit = flag_info["unit"]
+            if isinstance(flag_value, bool):
+                flag_indicator = "+" if flag_value else "-"
+                jvm_options.append(f"-XX:{flag_indicator}{flag_name}")
+            else:
+                jvm_options.append(f"-XX:{flag_name}={flag_value}{flag_unit}")
 
-    def _decrease_ParallelGCThreads(self):
-        idx = 1
-        coef = 4
-        saved_values = [
-            self._perf_states[i]["args"][idx] for i in self._perf_states.keys()
-        ]
-        self._state[idx] = min(
-            saved_values, key=lambda x: abs(x - (self._state[idx] - coef))
-        )
-        self._state[idx] -= coef
+        return jvm_options
 
-    def _increase_ParallelGCThreads(self):
-        idx = 1
-        coef = 4
-        saved_values = [
-            self._perf_states[i]["args"][idx] for i in self._perf_states.keys()
-        ]
-        self._state[idx] = min(
-            saved_values, key=lambda x: abs(x - (self._state[idx] + coef))
-        )
-        self._state[idx] += coef
-
-    # def _is_equal(self, state, target):
-    #     return np.allclose(state[0], target[0])
-
-    def _get_jvm_opts(self, flags):
-        jvm_opts = []
-        for flag_name in self._flags.keys():
-            i = list(self._flags.keys()).index(flag_name)
-            # `state[:self._num_flags]` stores an array of current
-            # flag values [<MaxHeapSize>, <InitialHeapSize>]
-            flag_value = int(flags[i])
-            # TODO: Add a condition for flags with boolean values
-            # TODO: Add a unit!
-            jvm_opts.append(f"-XX:{flag_name}={flag_value}")
-        return jvm_opts
-
-    def _run(
+    def _run_benchmark(
         self,
         jvm_opts: List[str],
         gc_log_file: str,
@@ -593,19 +744,22 @@ class JVMEnv(py_environment.PyEnvironment):
             raise FileNotFoundError(callback_path)
 
         # Clean up before running the benchmark
-        if os.path.exists(gc_log_file):
+        try:
             os.remove(gc_log_file)
+        except FileNotFoundError:
+            pass
 
         # Default flags
-        # TODO: Use default flags from config file
-        jvm_opts.append("-XX:+UseParallelGC")
-        jvm_opts.append("-Xmx16G")
-        jvm_opts.append("-Xms16G")
-        jvm_opts.append("-XX:SurvivorRatio=130")
-        jvm_opts.append("-XX:TargetSurvivorRatio=66")
+        jvm_opts.append(*self._default_flags)
+        # jvm_opts.append("-XX:+UseParallelGC")
+        # jvm_opts.append("-Xmx16G")
+        # jvm_opts.append("-Xms16G")
+        # jvm_opts.append("-XX:SurvivorRatio=130")
+        # jvm_opts.append("-XX:TargetSurvivorRatio=66")
 
         # Run the benchmark (hide output)
         try:
+            logging.debug("Running benchmark %s with JVM_OPTS: %s", bm, jvm_opts)
             subprocess.check_output(
                 [
                     "java",
@@ -637,11 +791,11 @@ class JVMEnv(py_environment.PyEnvironment):
         print(
             "Successfully initialized a JVM Environment!\n",
             f"JDK: {self.jdk},\n",
-            f"Benchmark: {self._bm} ({self.bm_path}),\n",
+            f"Benchmark: {self.bm_name} ({self.bm_path}),\n",
             f"Number of iterations: {self._n},\n",
-            f"Goal: {self._goal},\n",
+            f"Goals: {self._goals},\n",
             f"Number of JVM options: {self._num_flags},\n",
             f"JVM options: {self._flags},\n",
-            f"Env. default state: {self._default_state},\n",
-            f"Env. default goal value: {self._default_state[self._goal_idx]},\n",
+            # f"Env. default state: {self._default_state},\n",
+            # f"Env. default goal value: {self._default_state[self._goal_idx]},\n",
         )

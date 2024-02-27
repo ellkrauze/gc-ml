@@ -21,12 +21,28 @@ class JVMEnv(py_environment.PyEnvironment):
         bm_path: str,
         gc_viewer_jar: str,
         callback_path: str,
-        bm_name: str = "cassandra",
+        bm_name: str = "avrora",
         n: int = 5,
         goal: str = "avgGCPause",
         verbose: bool = False,
     ):
-        # TODO: Write a Class description with attributes
+        """A Python environment class for Reinforcement Learning
+        algorithm purposes. It represents a utility class that can be
+        used for a Java Virtual Machine (JVM) configuration tuning.
+
+        Args:
+            jdk_path (str): A path to JDK directory.
+            bm_path (str): A path to DaCapo benchmark jar file to run.
+            gc_viewer_jar (str): A path to GCViewer jar file.
+            callback_path (str): A path to DaCapo benchmark's callback file.
+            bm_name (str, optional): DaCapo benchmark name. Defaults to "avrora".
+            n (int, optional): A number of iterations to run the benchmark. Defaults to 5.
+            goal (str, optional): A user's objective name they want to tune.
+                The objective's name is extracted from a summary file (GCViewer
+                results). Defaults to "avgGCPause".
+            verbose (bool, optional): Print debug messages. Defaults to False.
+        """
+
         self.jdk = jdk_path
         self.bm_path = bm_path
         self.gc_viewer_jar = gc_viewer_jar
@@ -82,9 +98,7 @@ class JVMEnv(py_environment.PyEnvironment):
         )
 
         # For offline RL: if you already have a dataset file with trajectories.
-        self._new_df = pd.read_csv(
-            f"datasets/{self._bm}_real_saved_states.csv"
-        )
+        self._new_df = pd.read_csv(f"datasets/{self._bm}_real_saved_states.csv")
 
         # self._default_state = self._get_default_state(mode="default")
         self._default_state = self._get_default_state(mode="random")
@@ -204,7 +218,7 @@ class JVMEnv(py_environment.PyEnvironment):
         # Termination criteria
         if self._state[self._goal_idx] <= self._default_state[self._goal_idx] * 0.04:
             self._episode_ended = True
-        
+
         self._reward = self._get_reward(
             current_state=self._state,
             previous_state=self._default_state,
@@ -493,7 +507,7 @@ class JVMEnv(py_environment.PyEnvironment):
             reward = reward_ex + beta * reward_in
             reward = round(reward, 4)
         else:
-            reward = -1    
+            reward = -1
 
         return reward
 
